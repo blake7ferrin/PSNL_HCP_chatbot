@@ -51,6 +51,9 @@ Internal read-only Telegram bot for Polar Air admin staff. Answers questions abo
 | `LLM_SUMMARIES_ENABLED` | No | Set to `0` or `false` to disable LLM summaries (deterministic formatting only) |
 | `COMPOSE_TONE` | No | Response tone: `neutral_professional`, `witty_confident`, or `minimalist` |
 | `HCP_API_BASE_URL` | No | Override Housecall Pro API base (default: `https://api.housecallpro.com`) |
+| `HCP_API_VERSION_STRATEGY` | No | `public` (default, no prefix) or `legacy` (adds `/v1`) |
+| `HCP_API_PREFIX` | No | Explicit API prefix override (e.g. `v1` or `housecall/v1`) |
+| `BOT_DB_PATH` | No | SQLite DB path for memory/metrics (default: `./data/bot.db`) |
 | `DEBUG` | No | Set to `1`, `true`, or `yes` for full logging (intent, HCP response keys, LLM success/failure) |
 
 ## Verify setup
@@ -62,6 +65,12 @@ doppler run -- py check_env.py
 ```
 
 This checks that `TELEGRAM_BOT_TOKEN` and `HCP_API_KEY` are set, and pings the Housecall Pro API. If you see **all 404** for HCP paths, the key may be valid but your account/plan may use different endpoint paths or base URL; set `HCP_API_BASE_URL` in Doppler if your docs specify another base. Requires **Housecall Pro MAX** plan for API access.
+
+You can also use `/health` inside Telegram to see env status, HCP connectivity, and DB status (no secrets are shown).
+
+## Data storage
+
+Conversation state and daily metrics are stored in SQLite at `BOT_DB_PATH` (default: `./data/bot.db`). The DB is created automatically and uses WAL mode.
 
 ## Capabilities
 
@@ -89,6 +98,12 @@ User messages are mapped to **intents** (e.g. `jobs.list`, `job.get`, `estimates
 2. **Order of checks**: Help → get-by-id (job, estimate, customer) → "the second one" resolution from last list → date range + jobs/schedule → stats → company → pricebook → estimates → customers → jobs (default today) → unknown.
 3. **Date parsing**: Phrases like "today", "next week", "this weekend", "Tuesday" (or "what about Tuesday?" after "next week") are parsed in `src/intents/dateparse.py` into a start/end date in the user’s timezone (default `America/Phoenix`).
 4. **Output**: An `Intent` (name + optional filters like date range, optional entity_id for get-by-id). Handlers in `src/telegram/handlers.py` call the HCP API and the compose layer to format the reply.
+
+---
+
+## Confirmations
+
+When the bot asks a follow-up that implies an action (e.g. “Want me to list jobs from last week?”), you can reply with a confirmation like **yes**, **yes please**, **ok**, or **sure**. The bot will execute the suggested action. If there’s no pending action, it will ask a short clarifying question.
 
 ---
 
