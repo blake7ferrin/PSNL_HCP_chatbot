@@ -21,6 +21,7 @@ Internal read-only Telegram bot for Polar Air admin staff. Answers questions abo
    - `ALLOWED_TELEGRAM_IDS` (optional, comma-separated Telegram user IDs)
    - `LLM_MODEL` (optional)
 4. Install Python deps and run with Doppler:
+
    ```bash
    pip install -r requirements.txt
    doppler run -- py run.py
@@ -30,16 +31,18 @@ Internal read-only Telegram bot for Polar Air admin staff. Answers questions abo
 
 1. Copy `.env.example` to `.env` and set `TELEGRAM_BOT_TOKEN`, `HCP_API_KEY`, and any optional vars.
 2. Install and run:
+
    ```bash
    pip install -r requirements.txt
    py run.py
    ```
+
    Or: `py -m src.main`
 
 ## Environment variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| -------- | -------- | ----------- |
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `HCP_API_KEY` | Yes | Housecall Pro API key (Bearer token) |
 | `ALLOWED_TELEGRAM_IDS` | No | Comma-separated Telegram user IDs; if set, only these users can use the bot |
@@ -47,6 +50,18 @@ Internal read-only Telegram bot for Polar Air admin staff. Answers questions abo
 | `LLM_MODEL` | No | Model name (default: `gpt-4o-mini` for OpenAI; `openai/gpt-4o-mini` for OpenRouter) |
 | `LLM_SUMMARIES_ENABLED` | No | Set to `0` or `false` to disable LLM summaries (deterministic formatting only) |
 | `COMPOSE_TONE` | No | Response tone: `neutral_professional`, `witty_confident`, or `minimalist` |
+| `HCP_API_BASE_URL` | No | Override Housecall Pro API base (default: `https://api.housecallpro.com`) |
+| `DEBUG` | No | Set to `1`, `true`, or `yes` for full logging (intent, HCP response keys, LLM success/failure) |
+
+## Verify setup
+
+Run with the same env as the bot (e.g. Doppler):
+
+```bash
+doppler run -- py check_env.py
+```
+
+This checks that `TELEGRAM_BOT_TOKEN` and `HCP_API_KEY` are set, and pings the Housecall Pro API. If you see **all 404** for HCP paths, the key may be valid but your account/plan may use different endpoint paths or base URL; set `HCP_API_BASE_URL` in Doppler if your docs specify another base. Requires **Housecall Pro MAX** plan for API access.
 
 ## Capabilities
 

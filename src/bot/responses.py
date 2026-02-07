@@ -5,6 +5,7 @@ from typing import Any, Optional
 from src.utils.formatting import format_money
 from src.utils.time import format_single_time, format_dt_range, format_schedule_line, DEFAULT_USER_TZ
 from src.compose.formatter import get_best_total_amount, get_best_money_fields
+from src.compose import suggestions as compose_suggestions
 
 DEBUG = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")
 
@@ -25,13 +26,13 @@ def _safe(value: Any, default: str = "—", escape: bool = True) -> str:
 
 
 def _list(items: Any) -> list[Any]:
-    """Get a list from API response (either direct list or dict with common keys)."""
+    """Get a list from API response (either direct list or dict with common keys). HCP may use results."""
     if items is None:
         return []
     if isinstance(items, list):
         return items
     if isinstance(items, dict):
-        for key in ("jobs", "estimates", "customers", "employees", "pros", "services", "materials", "appointments", "data", "items"):
+        for key in ("jobs", "estimates", "customers", "employees", "pros", "services", "materials", "appointments", "data", "items", "results"):
             if key in items and isinstance(items[key], list):
                 return items[key]
     return []
@@ -210,7 +211,14 @@ def format_job_total_only(data: Any) -> str:
         if outstanding_val is not None and outstanding_val != total_val:
             line += f" (Outstanding: {format_money(outstanding_val)})"
         return line
-    return f"Job #{jid}: No total amount on file."
+    # No total: explain why and suggest next steps (no fabricated totals)
+    msg = "This job doesn't have a total yet. It looks like it hasn't been invoiced."
+    sugs = compose_suggestions.money_no_total_suggestions()
+    if sugs:
+        msg += "\n\n" + sugs[0]
+        if len(sugs) > 1:
+            msg += " " + sugs[1]
+    return msg
 
 
 def format_job_time_only(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
@@ -226,13 +234,14 @@ def format_job_time_only(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
 
 
 # ---- Estimates ----
-def format_estimates_list(data: Any) -> str:
-    """Format list of estimates."""
+def format_estimates_list(data: Any, list_label: Optional[str] = None) -> str:
+    """Format list of estimates. list_label e.g. 'Unscheduled estimates' for header/empty message."""
     estimates = _list(data)
+    label = (list_label or "estimates").strip() or "estimates"
     if not estimates:
-        return "No estimates found."
+        return f"No {label} found."
 
-    lines = [f"*{len(estimates)} estimate(s):*"]
+    lines = [f"*{len(estimates)} {label}:*"]
     for e in estimates[:25]:
         obj = e if isinstance(e, dict) else {}
         eid = obj.get("id") or obj.get("estimate_id") or "?"

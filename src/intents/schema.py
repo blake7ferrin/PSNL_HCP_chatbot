@@ -17,6 +17,7 @@ INTENT_COMPANY_INFO = "company.info"
 INTENT_SCHEDULE = "schedule"  # alias for jobs.list with date
 INTENT_STATS = "stats"
 INTENT_HELP = "help"
+INTENT_AGGREGATION_UNSUPPORTED = "aggregation.unsupported"
 INTENT_UNKNOWN = "unknown"
 
 

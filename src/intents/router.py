@@ -17,6 +17,7 @@ from .schema import (
     INTENT_SCHEDULE,
     INTENT_STATS,
     INTENT_HELP,
+    INTENT_AGGREGATION_UNSUPPORTED,
     INTENT_UNKNOWN,
 )
 from .dateparse import parse_human_date, DEFAULT_TZ
@@ -166,6 +167,16 @@ def route(
         except ValueError:
             last_end = None
 
+    # ---- Date range + aggregation (before Help so "revenue this week" isn't matched by "hi" in "this") ----
+    date_range_early = parse_human_date(user_text, context_start=last_start, context_end=last_end, tz_name=tz)
+    _AGGREGATION_PHRASES = ("collected", "revenue", "how much did we make", "how much we made", "total collected", "our total")
+    if date_range_early and any(p in normalized for p in _AGGREGATION_PHRASES):
+        filters_agg = IntentFilters()
+        filters_agg.start_date = date_range_early.start
+        filters_agg.end_date = date_range_early.end
+        filters_agg.date_label = date_range_early.label
+        return Intent(INTENT_AGGREGATION_UNSUPPORTED, filters=filters_agg)
+
     # ---- Help (skip ordinal phrases like "the third one") ----
     looks_like_ordinal_request = bool(re.search(r"\b(?:the\s+)?(?:first|second|third|fourth|fifth)\s+one\b", normalized))
     if not looks_like_ordinal_request and any(k in normalized for k in _HELP_KEYWORDS) and not _extract_id(user_text, "job"):
@@ -231,8 +242,9 @@ def route(
         filters.date_label = date_range.label
 
     # Jobs/schedule intents with date (or follow-up: "what about Tuesday?" with last_intent + date_range)
+    # "busy" = is X busy tomorrow? / who's busy next week? -> jobs for that date (person filter not yet supported)
     jobs_or_schedule = (
-        any(j in normalized for j in ("job", "jobs", "scheduled", "schedule", "calendar", "appointments"))
+        any(j in normalized for j in ("job", "jobs", "scheduled", "schedule", "calendar", "appointments", "busy"))
         or "any day" in normalized
         or "anything on" in normalized
         or "what's on" in normalized
@@ -265,9 +277,14 @@ def route(
     if any(k in normalized for k in _PRICEBOOK_KEYWORDS):
         return Intent(INTENT_PRICEBOOK_SEARCH)
 
-    # ---- Estimates list ----
+    # ---- Estimates list (optionally unscheduled / open) ----
     if any(k in normalized for k in _ESTIMATE_KEYWORDS):
-        return Intent(INTENT_ESTIMATES_LIST)
+        filters = IntentFilters()
+        if "unscheduled" in normalized:
+            filters.status = "unscheduled"
+        elif "open" in normalized:
+            filters.status = "open"
+        return Intent(INTENT_ESTIMATES_LIST, filters=filters)
 
     # ---- Customers list ----
     if any(k in normalized for k in _CUSTOMER_KEYWORDS):

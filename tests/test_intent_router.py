@@ -15,6 +15,7 @@ from src.intents.schema import (
     INTENT_COMPANY_INFO,
     INTENT_STATS,
     INTENT_HELP,
+    INTENT_AGGREGATION_UNSUPPORTED,
     INTENT_UNKNOWN,
 )
 
@@ -69,9 +70,48 @@ def test_any_day_next_week():
     assert r.filters.date_label is not None
 
 
+def test_jobs_last_week():
+    r = route("What jobs did we have last week?")
+    assert r.name == INTENT_JOBS_LIST
+    assert r.filters.date_label == "last week"
+    assert r.filters.start_date is not None
+    assert r.filters.end_date is not None
+    assert r.filters.start_date < r.filters.end_date
+
+
+def test_aggregation_total_collected_last_week():
+    """Aggregation questions route to INTENT_AGGREGATION_UNSUPPORTED, not jobs.list."""
+    r = route("What was our total collected amount last week?")
+    assert r.name == INTENT_AGGREGATION_UNSUPPORTED
+    assert r.name != INTENT_JOBS_LIST
+    assert r.filters.date_label == "last week"
+    assert r.filters.start_date is not None
+    assert r.filters.end_date is not None
+
+
+def test_aggregation_revenue_this_week():
+    r = route("revenue this week")
+    assert r.name == INTENT_AGGREGATION_UNSUPPORTED
+    assert r.name != INTENT_JOBS_LIST
+
+
+def test_aggregation_how_much_did_we_make():
+    r = route("how much did we make last week?")
+    assert r.name == INTENT_AGGREGATION_UNSUPPORTED
+
+
 def test_estimates_list():
     assert route("list estimates").name == INTENT_ESTIMATES_LIST
     assert route("estimates").name == INTENT_ESTIMATES_LIST
+
+
+def test_estimates_list_unscheduled_open():
+    r = route("Show unscheduled estimates")
+    assert r.name == INTENT_ESTIMATES_LIST
+    assert r.filters.status == "unscheduled"
+    r = route("Show open estimates")
+    assert r.name == INTENT_ESTIMATES_LIST
+    assert r.filters.status == "open"
 
 
 def test_customers_list():

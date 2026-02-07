@@ -44,6 +44,19 @@ def test_this_week():
     assert r.end.weekday() == 6
 
 
+def test_last_week():
+    r = parse_human_date("last week", tz_name=DEFAULT_TZ)
+    assert r is not None
+    assert r.label == "last week"
+    assert r.start.weekday() == 0
+    assert r.end.weekday() == 6
+    assert (r.end - r.start).days == 6
+    # Last week should be before this week
+    from datetime import timedelta
+    this_week_monday = date.today() - timedelta(days=date.today().weekday())
+    assert r.end < this_week_monday
+
+
 def test_next_7_days():
     r = parse_human_date("next 7 days", tz_name=DEFAULT_TZ)
     assert r is not None

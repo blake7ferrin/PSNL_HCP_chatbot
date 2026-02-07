@@ -34,12 +34,12 @@ class HCPClient:
     def __init__(
         self,
         *,
-        base_url: str = "https://api.housecallpro.com",
+        base_url: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or os.getenv("HCP_API_BASE_URL") or "https://api.housecallpro.com").rstrip("/")
         self._token = token or os.getenv("HCP_API_KEY")
         if not self._token:
             raise ValueError("HCP API token required: set HCP_API_KEY or pass token=")
@@ -47,8 +47,9 @@ class HCPClient:
         self._max_retries = max(0, max_retries)
 
     def _headers(self) -> dict[str, str]:
+        # API key: "Token <key>". OAuth 2.0: "Bearer <access_token>". We use API key (HCP_API_KEY).
         return {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Token {self._token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }

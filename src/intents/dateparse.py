@@ -1,6 +1,6 @@
 """Normalize human date phrases to (start_dt, end_dt) in user timezone.
 
-Supports: today, tomorrow, yesterday, next week, this week, next 7 days,
+Supports: today, tomorrow, yesterday, last week, next week, this week, next 7 days,
 this weekend, explicit dates (Jan 30), and follow-up day references (e.g. "Tuesday"
 meaning next Tuesday or Tuesday within last referenced range).
 """
@@ -67,13 +67,13 @@ def parse_human_date(
     normalized = _normalize(text)
     today = _today_in_tz(tz_name)
 
-    # ---- Single day: today / tomorrow / yesterday ----
-    if normalized in ("today", "todays"):
+    # ---- Single day: today / tomorrow / yesterday (exact or as word in sentence) ----
+    if normalized in ("today", "todays") or re.search(r"\btoday\b", normalized):
         return DateRange(today, today, "today")
-    if normalized in ("tomorrow", "tomorrows"):
+    if normalized in ("tomorrow", "tomorrows") or re.search(r"\btomorrow\b", normalized):
         d = today + timedelta(days=1)
         return DateRange(d, d, "tomorrow")
-    if normalized in ("yesterday", "yesterdays"):
+    if normalized in ("yesterday", "yesterdays") or re.search(r"\byesterday\b", normalized):
         d = today - timedelta(days=1)
         return DateRange(d, d, "yesterday")
 
@@ -115,6 +115,14 @@ def parse_human_date(
                 return DateRange(d, d, d.strftime("%a %b %d"))
             except ValueError:
                 pass
+
+    # ---- "Last week" = previous Monday through Sunday ----
+    if re.search(r"\blast\s+week\b", normalized) or re.search(r"\bprevious\s+week\b", normalized) or re.search(r"\bpast\s+week\b", normalized):
+        # This week's Monday minus 7 days = last Monday
+        this_week_monday = today - timedelta(days=today.weekday())
+        last_monday = this_week_monday - timedelta(days=7)
+        last_sunday = last_monday + timedelta(days=6)
+        return DateRange(last_monday, last_sunday, "last week")
 
     # ---- "Next week" = next Monday 00:00 through next Sunday 23:59 ----
     if re.search(r"\bnext\s+week\b", normalized):

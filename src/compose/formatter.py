@@ -1,4 +1,5 @@
 """Turn API data into Telegram-ready text: grouped by day, next actions, escape-safe."""
+import logging
 from collections import defaultdict
 from datetime import date
 from typing import Any, Optional
@@ -8,6 +9,8 @@ from src.utils.time import format_single_time, DEFAULT_USER_TZ
 
 from .templates import get_phrase
 from . import suggestions
+
+logger = logging.getLogger(__name__)
 
 
 def get_best_total_amount(obj: Any) -> Any:
@@ -19,21 +22,57 @@ def get_best_total_amount(obj: Any) -> Any:
     return total
 
 
+def _sum_line_items(job_obj: dict, key_choices: tuple[str, ...] = ("total", "amount", "price", "total_price")) -> Optional[Any]:
+    """Sum totals from line_items or similar list if present. Returns first non-zero sum found."""
+    for list_key in ("line_items", "lines", "items", "charges"):
+        items = job_obj.get(list_key)
+        if not isinstance(items, list):
+            continue
+        for key in key_choices:
+            total = 0
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                v = it.get(key)
+                if v is not None:
+                    try:
+                        total += int(v) if isinstance(v, (int, float)) else int(float(v))
+                    except (TypeError, ValueError):
+                        pass
+            if total != 0:
+                return total
+    return None
+
+
 def get_best_money_fields(job_obj: Any) -> tuple[Any, Any]:
     """
     Get (total_val, outstanding_val) for a job. All values must be passed through format_money().
-    Priority for total: invoice.total / invoice.amount_total if invoice exists, else job.total_amount, else job.total.
-    For outstanding: job.balance_due or job.amount_due (never show same raw field as both total and outstanding).
+    Tries common HCP/API field names: invoice.total, job.total_amount, line_items sum, etc.
     """
     if not job_obj or not isinstance(job_obj, dict):
         return (None, None)
+    # Unwrap if API returns { "job": { ... } }
+    if "job" in job_obj and isinstance(job_obj["job"], dict):
+        job_obj = job_obj["job"]
     total_val = None
     outstanding_val = None
     inv = job_obj.get("invoice")
     if isinstance(inv, dict):
-        total_val = inv.get("total") or inv.get("amount_total") or inv.get("total_amount")
+        total_val = (
+            inv.get("total") or inv.get("amount_total") or inv.get("total_amount")
+            or inv.get("amount") or inv.get("grand_total")
+            or inv.get("total_price") or inv.get("price_total")
+        )
     if total_val is None:
-        total_val = job_obj.get("total_amount") or job_obj.get("total")
+        total_val = (
+            job_obj.get("total_amount") or job_obj.get("total")
+            or job_obj.get("amount") or job_obj.get("grand_total")
+            or job_obj.get("total_amount_cents")
+            or job_obj.get("total_price") or job_obj.get("price_total")
+            or job_obj.get("invoice_total")
+        )
+    if total_val is None:
+        total_val = _sum_line_items(job_obj)
     outstanding_val = job_obj.get("balance_due") or job_obj.get("amount_due")
     if outstanding_val is not None and total_val is not None and outstanding_val == total_val:
         outstanding_val = None
@@ -41,6 +80,12 @@ def get_best_money_fields(job_obj: Any) -> tuple[Any, Any]:
         total_val = inv.get("balance_due") or inv.get("amount_due")
     if total_val is None:
         total_val = job_obj.get("amount_due") or job_obj.get("balance_due")
+    if total_val is None:
+        logger.debug(
+            "job total not found; job keys=%s invoice keys=%s",
+            list(job_obj.keys()) if job_obj else [],
+            list(inv.keys()) if isinstance(inv, dict) else None,
+        )
     return (total_val, outstanding_val)
 
 # Telegram Markdown: escape these so API content doesn't break parse_mode
@@ -165,7 +210,14 @@ def format_jobs_list_by_day(
     jobs = _list_from_response(jobs_data)
     if not jobs:
         no_phrase = get_phrase("no_results")
-        block = f"{no_phrase} {_escape_md(date_label)}."
+        if date_label and "that period" in no_phrase:
+            block = no_phrase.replace("that period", _escape_md(date_label))
+        elif date_label and "that range" in no_phrase:
+            block = no_phrase.replace("that range", _escape_md(date_label))
+        elif date_label and no_phrase.strip() == "No jobs.":
+            block = f"No jobs for {_escape_md(date_label)}."
+        else:
+            block = no_phrase
         if include_suggestions:
             sugs = suggestions.ops_coach_suggestions(jobs_data, date_label=date_label)
             block += "\n\n" + get_phrase("next_actions_header") + "\n• " + "\n• ".join(sugs)
@@ -221,15 +273,44 @@ def format_help_message() -> str:
 
 
 def format_unknown_capabilities(*, with_buttons_hint: bool = False) -> str:
-    """Short capability list + example queries when intent is unknown."""
+    """Confident fallback: what we can do, not apology."""
     text = (
-        "I didn’t quite get that. I can answer questions about:\n"
+        "I can't calculate that directly yet, but here's what I *can* help with:\n"
         "jobs, estimates, customers, company, pricebook, and schedule.\n\n"
-        "Try: \"Jobs today\", \"Next week\", \"List estimates\", \"Help\"."
+        "Try: _Jobs today_, _Next week_, _List estimates_, or _Help_."
     )
     if with_buttons_hint:
         text += "\n\nYou can also use the quick replies below."
     return text
+
+
+def format_aggregation_unsupported(
+    date_label: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> str:
+    """
+    When user asks for total collected / revenue for a period: explain why we can't,
+    reference context (date range), offer alternatives, one follow-up suggestion.
+    No job list — user can ask for it explicitly.
+    """
+    period_ref = date_label
+    if start_date and end_date:
+        try:
+            period_ref = f"{date_label} ({start_date.strftime('%b %d')}–{end_date.strftime('%b %d')})"
+        except (AttributeError, TypeError):
+            pass
+    line1 = (
+        "I can't calculate total collected amounts yet — Housecall Pro doesn't expose "
+        "a single \"collected total\" endpoint."
+    )
+    line2 = (
+        f"For {_escape_md(period_ref)}, I can list jobs with their invoice totals, "
+        "or show completed jobs from that period."
+    )
+    sugs = suggestions.money_aggregation_suggestions(date_label)
+    line3 = sugs[0] if sugs else "Want me to list jobs for that period instead?"
+    return f"{line1}\n\n{line2}\n\n{line3}"
 
 
 def extract_job_ids_from_list(jobs_data: Any) -> list[str]:

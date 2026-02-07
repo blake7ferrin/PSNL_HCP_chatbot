@@ -1,6 +1,29 @@
 """Deterministic Ops Coach: suggest next queries from returned data. Read-only suggestions only."""
 from typing import Any
 
+
+def money_no_total_suggestions() -> list[str]:
+    """Suggestions when a job has no total (e.g. not yet invoiced). One primary + one alternative."""
+    return [
+        "Want me to check if there's an estimate for this job?",
+        "Want to see completed jobs with invoices?",
+    ]
+
+
+def money_aggregation_suggestions(date_label: str) -> list[str]:
+    """Single follow-up suggestion when user asked for total collected / revenue (we can't compute)."""
+    return [f"Want me to list jobs from {date_label} instead?"]
+
+
+def money_dead_end_suggestions() -> list[str]:
+    """Suggestions for money-related dead ends (no total, unsupported aggregation, etc.)."""
+    return [
+        "List jobs with invoices",
+        "List paid invoices",
+        "Show estimates awaiting approval",
+        "Show completed jobs without invoices",
+    ]
+
 # Thresholds (tunable)
 LOW_JOBS_THRESHOLD = 3
 MANY_JOBS_PER_DAY_THRESHOLD = 5

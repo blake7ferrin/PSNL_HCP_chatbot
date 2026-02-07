@@ -1,7 +1,10 @@
 """Telegram message handlers: auth, intent routing, HCP fetch, compose, reply."""
+import logging
 import os
 from datetime import date
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -20,6 +23,7 @@ from src.intents.schema import (
     INTENT_COMPANY_INFO,
     INTENT_STATS,
     INTENT_HELP,
+    INTENT_AGGREGATION_UNSUPPORTED,
     INTENT_UNKNOWN,
 )
 from src.memory import get_chat_memory
@@ -34,6 +38,7 @@ from src.compose.formatter import (
     format_jobs_list_by_day,
     format_help_message,
     format_unknown_capabilities,
+    format_aggregation_unsupported,
     extract_job_ids_from_list,
 )
 from src.compose.templates import get_phrase
@@ -108,6 +113,8 @@ _REFERENCE_PHRASES = (
 )
 # Follow-up intents that implicitly refer to last job when anchor has single id
 _TOTAL_DETAILS_PHRASES = ("total", "details", "info", "amount", "cost", "price", "show job")
+# "Total collected last week" / "our total this week" = period aggregate, not "that job's total"
+_PERIOD_AGGREGATE_PHRASES = ("collected", "revenue", "our total", "we collected", "total for the week", "total for last")
 
 
 def _should_inject_resolved_entity(text: str, anchor: dict) -> bool:
@@ -115,11 +122,16 @@ def _should_inject_resolved_entity(text: str, anchor: dict) -> bool:
     True if we should inject resolved_entity into context.
     - Reference phrase (that one, next week's job, etc.) + anchor exists
     - OR total/details/amount + anchor exists with exactly 1 job
+    - EXCEPT when user asks for period aggregate (e.g. "total collected last week")
     """
     if not anchor:
         return False
     ids = anchor.get("ids") or []
     lower = text.lower().strip()
+    if any(p in lower for p in _PERIOD_AGGREGATE_PHRASES):
+        period_words = ("last week", "this week", "next week", "today", "yesterday", "this month", "last month")
+        if any(p in lower for p in period_words):
+            return False
     if any(p in lower for p in _REFERENCE_PHRASES):
         return True
     if len(ids) == 1 and any(p in lower for p in _TOTAL_DETAILS_PHRASES):
@@ -167,6 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif any(p in text.lower() for p in _REFERENCE_PHRASES) and not anchor:
         ctx["reference_phrase_used"] = True
     intent = route(text, context=ctx, tz_name=memory.timezone)
+    logger.debug("message=%r -> intent=%s entity_id=%s filters=%s", text[:80], intent.name, getattr(intent, "entity_id", None), getattr(intent.filters, "date_label", None) or getattr(intent.filters, "status", None))
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
@@ -178,8 +191,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         use_markdown = True
         entity_ids = None
     except Exception as e:
-        import sys
-        print(f"Handler error: {e}", file=sys.stderr, flush=True)
+        logger.exception("Handler error: %s", e)
         reply = responses.format_error(str(e))
         use_markdown = True
         entity_ids = None
@@ -226,8 +238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         await update.message.reply_text(reply or "Something went wrong.", parse_mode="Markdown" if use_markdown else None)
     except Exception as e:
-        import sys
-        print(f"Failed to send reply: {e}", file=sys.stderr, flush=True)
+        logger.exception("Failed to send reply: %s", e)
         try:
             await update.message.reply_text("Something went wrong. Check the bot logs.")
         except Exception:
@@ -244,11 +255,23 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
         if clarification == "multiple_jobs":
             return "I see multiple jobs. Do you mean the first or second one?", True, None
         if clarification == "no_job":
-            return "I don't see a job in context. Want me to show next week again?", True, None
+            return (
+                "I don't see a job list in context. Ask for a list first, then you can say \"the second one\" or \"details\".\n\n"
+                "Try: _Jobs today_, _Jobs next week_, or _Last week_."
+            ), True, None
         hint = intent.raw_slots.get("hint") if intent.raw_slots else None
         if hint:
             return hint + "\n\n" + format_unknown_capabilities(with_buttons_hint=False), True, None
         return format_unknown_capabilities(with_buttons_hint=False), True, None
+
+    # ---- aggregation unsupported (total collected / revenue for period: explain + alternatives, no job dump) ----
+    if intent.name == INTENT_AGGREGATION_UNSUPPORTED:
+        f = intent.filters
+        date_label = (f.date_label or "that period").strip() or "that period"
+        start_d = getattr(f, "start_date", None)
+        end_d = getattr(f, "end_date", None)
+        reply = format_aggregation_unsupported(date_label, start_date=start_d, end_date=end_d)
+        return reply, True, None
 
     # ---- jobs.list (always deterministic format so times are in user TZ, no UTC leak) ----
     if intent.name == INTENT_JOBS_LIST:
@@ -259,8 +282,11 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
             data = await hcp_jobs.list_jobs(start_date=start_iso, end_date=end_iso)
         else:
             data = await hcp_jobs.list_jobs(scheduled_start_date=start_iso or None)
+        jobs_list = _list_from_response(data)
+        logger.debug("jobs.list: response keys=%s jobs_count=%d", list(data.keys()) if isinstance(data, dict) else "raw", len(jobs_list))
         ids = extract_job_ids_from_list(data)
-        return format_jobs_list_by_day(data, date_label, include_suggestions=True, tz_name=tz_name), True, ids
+        reply = format_jobs_list_by_day(data, date_label, include_suggestions=True, tz_name=tz_name)
+        return reply, True, ids
 
     # ---- job.get (always use deterministic format for correct money + timezone) ----
     if intent.name == INTENT_JOB_GET and intent.entity_id:
@@ -276,8 +302,14 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
 
     # ---- estimates.list ----
     if intent.name == INTENT_ESTIMATES_LIST:
-        data = await hcp_estimates.list_estimates()
-        return responses.format_estimates_list(data), True, None
+        status_filter = intent.filters.status if intent.filters else None
+        data = await hcp_estimates.list_estimates(status=status_filter)
+        list_label = None
+        if status_filter == "unscheduled":
+            list_label = "unscheduled estimates"
+        elif status_filter == "open":
+            list_label = "open estimates"
+        return responses.format_estimates_list(data, list_label=list_label), True, None
 
     # ---- estimate.get ----
     if intent.name == INTENT_ESTIMATE_GET and intent.entity_id:
@@ -287,7 +319,9 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
             if llm.is_available():
                 summary = await llm.format_response("estimate_detail", data, user_message=user_message)
                 if summary:
+                    logger.debug("estimate.get: using LLM summary")
                     return summary, False, None
+                logger.debug("estimate.get: LLM returned None, using deterministic format")
         return responses.format_estimate_detail(data), True, None
 
     # ---- customers.search (list) ----
@@ -303,7 +337,9 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
             if llm.is_available():
                 summary = await llm.format_response("customer_detail", data, user_message=user_message)
                 if summary:
+                    logger.debug("customer.get: using LLM summary")
                     return summary, False, None
+                logger.debug("customer.get: LLM returned None, using deterministic format")
         return responses.format_customer_detail(data), True, None
 
     # ---- pricebook.search ----
@@ -352,7 +388,7 @@ def _list_from_response(data: Any) -> list:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("jobs", "estimates", "customers", "services", "materials", "data", "items"):
+        for key in ("jobs", "estimates", "customers", "services", "materials", "data", "items", "results"):
             if key in data and isinstance(data[key], list):
                 return data[key]
     return []

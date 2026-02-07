@@ -1,8 +1,11 @@
 """Optional LLM layer for natural-language summaries. Uses OpenAI or OpenRouter (OpenAI-compatible)."""
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # Lazy client so we don't require openai unless LLM is used
 _client: Optional[Any] = None
@@ -33,13 +36,16 @@ def _get_client():
             base_url="https://openrouter.ai/api/v1",
         )
         _model = os.getenv("LLM_MODEL", "").strip() or "openai/gpt-4o-mini"
+        logger.debug("LLM: using OpenRouter model=%s", _model)
     elif openai_key:
         from openai import AsyncOpenAI
         _client = AsyncOpenAI(api_key=openai_key)
         _model = os.getenv("LLM_MODEL", "").strip() or "gpt-4o-mini"
+        logger.debug("LLM: using OpenAI model=%s", _model)
     else:
         _client = False  # no key
         _model = None
+        logger.debug("LLM: no OPENAI_API_KEY or OPENROUTER_API_KEY set; LLM summaries disabled")
     return _client, _model
 
 
@@ -86,7 +92,8 @@ Reply with a SHORT, scannable summary for Telegram (no code blocks). For each jo
         )
         text = (response.choices[0].message.content or "").strip()
         return text if text else None
-    except Exception:
+    except Exception as e:
+        logger.warning("LLM format_jobs_list failed: %s", e, exc_info=logger.isEnabledFor(logging.DEBUG))
         return None
 
 
@@ -134,5 +141,6 @@ Reply with a SHORT, friendly summary for Telegram (under 800 characters). Use si
         )
         text = (response.choices[0].message.content or "").strip()
         return text if text else None
-    except Exception:
+    except Exception as e:
+        logger.warning("LLM format_response(%s) failed: %s", intent, e, exc_info=logger.isEnabledFor(logging.DEBUG))
         return None
