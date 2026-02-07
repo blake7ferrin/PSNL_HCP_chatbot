@@ -16,6 +16,7 @@ from src.intents.schema import (
     INTENT_STATS,
     INTENT_HELP,
     INTENT_AGGREGATION_UNSUPPORTED,
+    INTENT_CONFIRM,
     INTENT_UNKNOWN,
 )
 
@@ -139,6 +140,17 @@ def test_unknown():
     r = route("xyz random gibberish")
     assert r.name == INTENT_UNKNOWN
     assert route("").name == INTENT_UNKNOWN
+
+
+def test_confirm_intent():
+    assert route("yes").name == INTENT_CONFIRM
+    assert route("yes please").name == INTENT_CONFIRM
+    assert route("ok").name == INTENT_CONFIRM
+
+
+def test_job_id_rejects_customer_prefix():
+    r = route("job cus_123")
+    assert r.name == INTENT_UNKNOWN
 
 
 def test_follow_up_tuesday_with_context():
