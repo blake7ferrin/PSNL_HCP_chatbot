@@ -37,6 +37,14 @@ _COMPANY_KEYWORDS = ("company", "business", "organization", "setup", "settings",
 _PRICEBOOK_KEYWORDS = ("pricebook", "price book", "prices", "services", "materials", "price list")
 _EMPLOYEES_KEYWORDS = ("employees", "employee", "technicians", "technician", "team", "staff")
 
+_CONFIRM_PHRASES = ("yes", "yes please", "sure", "ok", "okay", "do it", "sounds good", "yeah", "yep", "please")
+
+_ID_PREFIXES = {
+    "job": "job_",
+    "estimate": "est_",
+    "customer": "cus_",
+}
+
 
 def _extract_id(text: str, prefix: str) -> Optional[str]:
     """Extract id after a prefix like 'job' or 'estimate'."""
@@ -51,6 +59,23 @@ def _extract_id(text: str, prefix: str) -> Optional[str]:
         if m:
             return m.group(1).strip()
     return None
+
+
+def _is_valid_entity_id(entity_type: str, entity_id: str) -> bool:
+    s = str(entity_id).strip()
+    if not s:
+        return False
+    lower = s.lower()
+    for etype, prefix in _ID_PREFIXES.items():
+        if lower.startswith(prefix):
+            return etype == entity_type
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", s))
+
+
+def _is_confirm(text: str) -> bool:
+    normalized = _normalize(text)
+    normalized = re.sub(r"[!?.]+$", "", normalized).strip()
+    return normalized in _CONFIRM_PHRASES
 
 
 def _parse_list_index(text: str) -> Optional[int]:
@@ -96,9 +121,7 @@ def route(
     normalized = _normalize(user_text)
 
     # ---- Confirm (yes please / sure / ok) -> execute pending_action; never route to help/unknown ----
-    _CONFIRM_PHRASES = {"yes", "yes please", "sure", "ok", "do it", "sounds good", "yeah", "yep", "please"}
-    _norm_clean = normalized.strip().rstrip(".")
-    if _norm_clean in _CONFIRM_PHRASES:
+    if _is_confirm(user_text):
         if context.get("pending_action"):
             return Intent(INTENT_CONFIRM, raw_slots={"pending_action": context["pending_action"]})
         return Intent(INTENT_CONFIRM)
@@ -115,6 +138,7 @@ def route(
     if resolved:
         re_ids = resolved.get("ids") or []
         re_type = resolved.get("type") or "job"
+        re_ids = [rid for rid in re_ids if _is_valid_entity_id(re_type, str(rid))]
         _TOTAL_KW = ("total", "amount", "cost", "price")
         if re_type == "job":
             if len(re_ids) == 0:
@@ -132,7 +156,10 @@ def route(
                 list_index = None
             if list_index is not None and 1 <= list_index <= len(re_ids):
                 focus = "money" if any(k in normalized for k in _TOTAL_KW) else None
-                return Intent(INTENT_JOB_GET, entity_id=re_ids[list_index - 1], focus=focus)
+                resolved_id = re_ids[list_index - 1]
+                if _is_valid_entity_id("job", resolved_id):
+                    return Intent(INTENT_JOB_GET, entity_id=resolved_id, focus=focus)
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
             return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
         if re_type == "customer":
             if len(re_ids) == 0:
@@ -216,16 +243,22 @@ def route(
     # ---- job.get by id: "job 12345", "get job 456" (not "jobs today" -> id "s") ----
     job_id = _extract_id(user_text, "job")
     if job_id and len(job_id) >= 2 and (job_id.isdigit() or job_id.replace("-", "").isalnum()):
+        if not _is_valid_entity_id("job", job_id):
+            return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a job ID."})
         return Intent(INTENT_JOB_GET, entity_id=job_id)
 
     # ---- estimate.get by id ----
     estimate_id = _extract_id(user_text, "estimate")
     if estimate_id and len(estimate_id) >= 2 and (estimate_id.isdigit() or estimate_id.isalnum()):
+        if not _is_valid_entity_id("estimate", estimate_id):
+            return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like an estimate ID."})
         return Intent(INTENT_ESTIMATE_GET, entity_id=estimate_id)
 
     # ---- customer.get by id ----
     customer_id = _extract_id(user_text, "customer")
     if customer_id and len(customer_id) >= 2 and (customer_id.isdigit() or customer_id.isalnum()):
+        if not _is_valid_entity_id("customer", customer_id):
+            return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a customer ID."})
         return Intent(INTENT_CUSTOMER_GET, entity_id=customer_id)
 
     # ---- "The second one" / "details for #2" -> resolve from last list ----
@@ -246,11 +279,14 @@ def route(
         if 0 <= idx < len(last_entity_ids):
             resolved_id = last_entity_ids[idx]
             if last_intent == INTENT_JOBS_LIST:
-                return Intent(INTENT_JOB_GET, entity_id=resolved_id)
+                if _is_valid_entity_id("job", resolved_id):
+                    return Intent(INTENT_JOB_GET, entity_id=resolved_id)
             if last_intent == INTENT_ESTIMATES_LIST:
-                return Intent(INTENT_ESTIMATE_GET, entity_id=resolved_id)
+                if _is_valid_entity_id("estimate", resolved_id):
+                    return Intent(INTENT_ESTIMATE_GET, entity_id=resolved_id)
             if last_intent == INTENT_CUSTOMERS_SEARCH:
-                return Intent(INTENT_CUSTOMER_GET, entity_id=resolved_id)
+                if _is_valid_entity_id("customer", resolved_id):
+                    return Intent(INTENT_CUSTOMER_GET, entity_id=resolved_id)
         if last_anchor:
             return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
         return Intent(

@@ -268,7 +268,7 @@ def format_help_message() -> str:
         "• *Pricebook* — \"Services\", \"Materials\"\n"
         "• *Schedule* — \"Schedule tomorrow\", \"This weekend\"\n\n"
         "You can ask follow-ups like \"What about Tuesday?\" or \"Details for the second one.\"\n\n"
-        "Commands: /start, /help, /whoami (your Telegram ID)\n\n"
+        "Commands: /start, /help, /whoami (your Telegram ID), /health\n\n"
         "I only read data; I don’t create or change anything."
     )
 

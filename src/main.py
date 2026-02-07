@@ -13,7 +13,7 @@ def get_application():
     """Build the Telegram Application (handlers in telegram.handlers)."""
     from telegram.ext import Application, MessageHandler, CommandHandler, filters
 
-    from src.telegram.handlers import handle_message, handle_command, handle_whoami
+    from src.telegram.handlers import handle_message, handle_command, handle_whoami, handle_health
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -23,6 +23,7 @@ def get_application():
     app.add_handler(CommandHandler("start", handle_command))
     app.add_handler(CommandHandler("help", handle_command))
     app.add_handler(CommandHandler("whoami", handle_whoami))
+    app.add_handler(CommandHandler("health", handle_health))
     # ALL so we're always called; we ignore non-text inside handle_message
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     return app
