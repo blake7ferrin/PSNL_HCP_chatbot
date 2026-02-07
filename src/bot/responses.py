@@ -303,6 +303,23 @@ def format_appointments_list(data: Any, date_label: str = "scheduled") -> str:
     return "\n".join(lines)
 
 
+# ---- Stats / summary ----
+def format_stats(counts: dict[str, int]) -> str:
+    """Format a one-message stats summary. Keys: jobs_today, jobs_this_week, estimates, customers."""
+    jobs_today = counts.get("jobs_today", 0)
+    jobs_week = counts.get("jobs_this_week", 0)
+    estimates = counts.get("estimates", 0)
+    customers = counts.get("customers", 0)
+    lines = [
+        "*Quick stats*",
+        f"• Jobs today: {jobs_today}",
+        f"• Jobs this week: {jobs_week}",
+        f"• Estimates: {estimates}",
+        f"• Customers: {customers}",
+    ]
+    return "\n".join(lines)
+
+
 def format_error(message: str) -> str:
     """Format an error message for the user (escaped for Markdown)."""
     return f"Sorry, I couldn't get that: {_escape_md(message)}"

@@ -24,6 +24,7 @@ INTENT_COMPANY_INFO = "company_info"
 INTENT_EMPLOYEES_LIST = "employees_list"
 INTENT_PRICEBOOK = "pricebook"
 INTENT_SCHEDULE = "schedule"
+INTENT_STATS = "stats"
 INTENT_HELP = "help"
 INTENT_UNKNOWN = "unknown"
 
@@ -36,6 +37,7 @@ COMPANY_KEYWORDS = ("company", "business", "organization", "setup", "settings", 
 PRICEBOOK_KEYWORDS = ("pricebook", "price book", "prices", "services", "materials", "price list")
 EMPLOYEES_KEYWORDS = ("employees", "employee", "technicians", "technician", "team", "staff")
 SCHEDULE_KEYWORDS = ("schedule", "scheduling", "calendar", "appointments", "who's working", "technicians today")
+STATS_KEYWORDS = ("stats", "statistics", "summary", "dashboard", "how's it looking", "overview", "numbers", "count")
 HELP_KEYWORDS = ("help", "what can you do", "commands", "support")
 
 
@@ -71,6 +73,77 @@ def _parse_date(token: str) -> Optional[str]:
             return d.isoformat()
         except ValueError:
             pass
+    return None
+
+
+# Weekday names for "next Monday" etc. (Python: Monday=0, Sunday=6)
+_WEEKDAY_NAMES = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5, "sunday": 6, "sun": 6,
+}
+
+
+def _parse_relative_phrase(text: str) -> Optional[tuple[str, Optional[str]]]:
+    """
+    Parse phrases like 'next Monday', 'last week', 'this month'.
+    Returns (date_iso, date_end_iso or None) for a single day or range.
+    """
+    normalized = _normalize(text)
+    today = date.today()
+
+    # "next Monday" / "next monday"
+    m = re.search(r"\bnext\s+(monday|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|mon)\b", normalized)
+    if m:
+        name = m.group(1).lower()
+        wd = _WEEKDAY_NAMES.get(name)
+        if wd is not None:
+            delta = (wd - today.weekday() + 7) % 7
+            if delta == 0:
+                delta = 7
+            d = today + timedelta(days=delta)
+            return (d.isoformat(), None)
+
+    # "last week" -> Monday to Sunday of previous week
+    if re.search(r"\blast\s+week\b", normalized):
+        last_week_end = today - timedelta(days=today.weekday() + 1)
+        last_week_start = last_week_end - timedelta(days=6)
+        return (last_week_start.isoformat(), last_week_end.isoformat())
+
+    # "this week" -> Monday to today (or to Sunday)
+    if re.search(r"\bthis\s+week\b", normalized):
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
+        return (week_start.isoformat(), week_end.isoformat())
+
+    # "next week" -> Monday to Sunday of the following week
+    if re.search(r"\bnext\s+week\b", normalized):
+        days_until_next_monday = (7 - today.weekday()) % 7
+        if days_until_next_monday == 0:
+            days_until_next_monday = 7
+        next_monday = today + timedelta(days=days_until_next_monday)
+        next_sunday = next_monday + timedelta(days=6)
+        return (next_monday.isoformat(), next_sunday.isoformat())
+
+    # "this month" -> first to last day of current month
+    if re.search(r"\bthis\s+month\b", normalized):
+        first = date(today.year, today.month, 1)
+        if today.month == 12:
+            last = date(today.year, 12, 31)
+        else:
+            last = date(today.year, today.month + 1, 1) - timedelta(days=1)
+        return (first.isoformat(), last.isoformat())
+
+    # "last month"
+    if re.search(r"\blast\s+month\b", normalized):
+        first = date(today.year, today.month, 1) - timedelta(days=1)
+        first = date(first.year, first.month, 1)
+        if first.month == 12:
+            last = date(first.year, 12, 31)
+        else:
+            last = date(first.year, first.month + 1, 1) - timedelta(days=1)
+        return (first.isoformat(), last.isoformat())
+
     return None
 
 
@@ -145,6 +218,27 @@ def parse_intent(text: str) -> IntentResult:
     if customer_id and (customer_id.isdigit() or customer_id.isalnum()):
         return IntentResult(INTENT_CUSTOMER_DETAIL, {"customer_id": customer_id})
 
+    # Relative phrases: "next Monday", "last week", "next week", "this month"
+    rel = _parse_relative_phrase(normalized)
+    if rel:
+        start, end = rel
+        # Jobs: "jobs next week", "jobs last week"
+        if any(j in normalized for j in ("job", "jobs")):
+            p = {"date": start}
+            if end:
+                p["date_end"] = end
+            return IntentResult(INTENT_JOBS_BY_DATE, p)
+        # Schedule: "schedule next week", "anything on the schedule for next week", "any day next week"
+        schedule_style = (
+            any(s in normalized for s in SCHEDULE_KEYWORDS)
+            or any(phrase in normalized for phrase in ("any day", "anything", "what's on", "anything on", "whats on"))
+        )
+        if schedule_style:
+            p = {"date": start}
+            if end:
+                p["date_end"] = end
+            return IntentResult(INTENT_SCHEDULE, p)
+
     # Date extraction for jobs/schedule: "jobs for 2025-02-08", "tomorrow's jobs", "Friday Jan 30th"
     date_str = _parse_date_from_text(normalized)
     if date_str and any(j in normalized for j in ("job", "jobs")):
@@ -196,6 +290,10 @@ def parse_intent(text: str) -> IntentResult:
     if any(k in normalized for k in SCHEDULE_KEYWORDS):
         return IntentResult(INTENT_SCHEDULE, {"date": date.today().isoformat()})
 
+    # Stats / summary
+    if any(k in normalized for k in STATS_KEYWORDS):
+        return IntentResult(INTENT_STATS, {})
+
     return IntentResult(INTENT_UNKNOWN, {})
 
 
@@ -209,6 +307,8 @@ def get_help_message() -> str:
         "• *Company* – \"Company info\", \"Company setup\"\n"
         "• *Employees* – \"List employees\", \"Technicians\", \"Team\"\n"
         "• *Pricebook* – \"Pricebook\", \"Services\", \"Materials\"\n"
-        "• *Schedule* – \"Schedule today\", \"Appointments\"\n\n"
+        "• *Schedule* – \"Schedule today\", \"Appointments\"\n"
+        "• *Stats* – \"Stats\", \"Summary\", \"How's it looking?\"\n\n"
+        "Commands: /start, /help, /whoami (your Telegram ID)\n\n"
         "I only read data; I don't create or change anything."
     )

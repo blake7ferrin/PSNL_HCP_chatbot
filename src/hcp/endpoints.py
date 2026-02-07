@@ -109,10 +109,60 @@ async def list_jobs(
     raise HCPClientError("Housecall Pro jobs endpoint not found (tried multiple paths).")
 
 
+# Paths to try for single job GET (same variants as list)
+_JOB_DETAIL_PATHS = ("v1/jobs/{id}", "api/v1/jobs/{id}", "jobs/{id}")
+
+
 async def get_job(job_id: str, client: Optional[HCPClient] = None) -> Any:
-    """Get a single job by id."""
+    """Get a single job by id. Tries multiple API path variants on 404."""
     c = client or _client()
-    return await c.get(f"v1/jobs/{job_id}")
+    last_error = None
+    for path_tpl in _JOB_DETAIL_PATHS:
+        path = path_tpl.format(id=job_id)
+        try:
+            return await c.get(path)
+        except HCPClientError as e:
+            last_error = e
+            if e.status_code == 404:
+                continue
+            raise
+    if last_error:
+        raise last_error
+    raise HCPClientError(f"Housecall Pro job {job_id} not found (tried multiple paths).")
+
+
+async def count_jobs_in_date_range(
+    start_iso: str,
+    end_iso: str,
+    client: Optional[HCPClient] = None,
+    max_fetched: int = 500,
+) -> int:
+    """Count jobs with scheduled date in [start_iso, end_iso]. Fetches one page (up to max_fetched)."""
+    data = await list_jobs(client=client, per_page=max_fetched)
+    jobs = _list_from_response(data)
+    return sum(
+        1
+        for j in jobs
+        for d in (_job_start_date_str(j if isinstance(j, dict) else {}),)
+        if d and start_iso <= d <= end_iso
+    )
+
+
+async def list_jobs_in_date_range(
+    start_iso: str,
+    end_iso: str,
+    client: Optional[HCPClient] = None,
+    max_fetched: int = 500,
+) -> Any:
+    """List jobs with scheduled date in [start_iso, end_iso]. Same response shape as list_jobs."""
+    data = await list_jobs(client=client, per_page=max_fetched)
+    jobs = _list_from_response(data)
+    filtered = [
+        j for j in jobs
+        for d in (_job_start_date_str(j if isinstance(j, dict) else {}),)
+        if d and start_iso <= d <= end_iso
+    ]
+    return {"jobs": filtered, "total_fetched": len(jobs)}
 
 
 # ---- Estimates ----
