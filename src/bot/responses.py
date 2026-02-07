@@ -1,5 +1,12 @@
 """Format Housecall Pro API responses into short, human-readable messages for Telegram."""
-from typing import Any
+import os
+from typing import Any, Optional
+
+from src.utils.formatting import format_money
+from src.utils.time import format_single_time, format_dt_range, format_schedule_line, DEFAULT_USER_TZ
+from src.compose.formatter import get_best_total_amount, get_best_money_fields
+
+DEBUG = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 # Telegram Markdown (legacy): escape these so API content doesn't break parse_mode
 _MD_ESCAPE = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\[", "\\": r"\\"})
@@ -125,8 +132,28 @@ def format_jobs_list(data: Any, date_label: str = "scheduled") -> str:
     return "\n".join(lines)
 
 
-def format_job_detail(data: Any) -> str:
-    """Format a single job (from get_job response)."""
+def _job_scheduled_start_end(job: dict) -> tuple[Optional[str], Optional[str]]:
+    """Extract scheduled start/end timestamps from job, including nested schedule/appointment. All treated as UTC."""
+    start = (
+        job.get("scheduled_start")
+        or job.get("scheduled_start_date")
+        or job.get("start_date")
+        or job.get("scheduled_at")
+    )
+    end = job.get("scheduled_end") or job.get("scheduled_end_date")
+    if start is None and isinstance(job.get("schedule"), dict):
+        s = job["schedule"]
+        start = start or s.get("scheduled_start") or s.get("scheduled_start_date")
+        end = end or s.get("scheduled_end") or s.get("scheduled_end_date")
+    if start is None and isinstance(job.get("appointment"), dict):
+        a = job["appointment"]
+        start = start or a.get("scheduled_start") or a.get("scheduled_start_date") or a.get("date")
+        end = end or a.get("scheduled_end")
+    return (start, end)
+
+
+def format_job_detail(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
+    """Format a single job (from get_job response). Scheduled/times in user TZ; amounts via format_money only."""
     job = _one(data) or data if isinstance(data, dict) else {}
     if not job:
         return "Job not found."
@@ -138,10 +165,15 @@ def format_job_detail(data: Any) -> str:
         addr = ", ".join(filter(None, [addr.get("address_line_1"), addr.get("city"), addr.get("state"), addr.get("zip_code")]))
     else:
         addr = _safe(addr)
-    scheduled = _safe(job.get("scheduled_start_date") or job.get("scheduled_start"))
+    start_ts, end_ts = _job_scheduled_start_end(job)
+    if start_ts or end_ts:
+        start_str, end_str, day_label = format_dt_range(start_ts, end_ts, tz_name=tz_name)
+        scheduled = f"{day_label} {start_str}" + (f" – {end_str}" if end_str else "") if start_str else _safe(start_ts or end_ts)
+    else:
+        scheduled = _safe(start_ts or end_ts)
     customer = job.get("customer")
     if isinstance(customer, dict):
-        customer = customer.get("display_name") or customer.get("first_name", "") + " " + customer.get("last_name", "")
+        customer = customer.get("display_name") or (customer.get("first_name", "") + " " + (customer.get("last_name", "") or "")).strip()
     customer = _safe(customer)
 
     lines = [
@@ -151,7 +183,31 @@ def format_job_detail(data: Any) -> str:
         f"Scheduled: {scheduled}",
         f"Customer: {customer}",
     ]
+    total_val, outstanding_val = get_best_money_fields(job)
+    if DEBUG:
+        import logging
+        logging.getLogger(__name__).debug(
+            "job detail money: total_val=%s (type=%s), outstanding_val=%s (type=%s)",
+            total_val, type(total_val).__name__ if total_val is not None else None,
+            outstanding_val, type(outstanding_val).__name__ if outstanding_val is not None else None,
+        )
+    if total_val is not None:
+        lines.append(f"Total: {format_money(total_val)}")
+    if outstanding_val is not None:
+        lines.append(f"Outstanding: {format_money(outstanding_val)}")
     return "\n".join(lines)
+
+
+def format_job_time_only(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
+    """Format only the schedule line for a job (for 'what time is it at?' follow-up)."""
+    job = _one(data) or data if isinstance(data, dict) else {}
+    if not job:
+        return "Job not found."
+    start_ts, end_ts = _job_scheduled_start_end(job)
+    arrival = job.get("arrival_window") or job.get("arrival_window_hours")
+    if isinstance(job.get("schedule"), dict):
+        arrival = arrival or job["schedule"].get("arrival_window") or job["schedule"].get("arrival_window_hours")
+    return format_schedule_line(start_ts, end_ts, tz_name=tz_name, arrival_window_hours=arrival)
 
 
 # ---- Estimates ----
@@ -166,8 +222,8 @@ def format_estimates_list(data: Any) -> str:
         obj = e if isinstance(e, dict) else {}
         eid = obj.get("id") or obj.get("estimate_id") or "?"
         status = _safe(obj.get("status"))
-        total = obj.get("total") or obj.get("total_amount")
-        total = f" ${total}" if total is not None else ""
+        total_val = get_best_total_amount(obj)
+        total = " " + format_money(total_val) if total_val is not None else ""
         lines.append(f"• Estimate {eid}: {status}{total}")
     if len(estimates) > 25:
         lines.append(f"_… and {len(estimates) - 25} more._")
@@ -175,15 +231,15 @@ def format_estimates_list(data: Any) -> str:
 
 
 def format_estimate_detail(data: Any) -> str:
-    """Format a single estimate."""
+    """Format a single estimate. Amounts via format_money."""
     est = _one(data) or data if isinstance(data, dict) else {}
     if not est:
         return "Estimate not found."
 
     eid = est.get("id") or est.get("estimate_id") or "?"
     status = _safe(est.get("status"))
-    total = est.get("total") or est.get("total_amount")
-    total = _safe(total) if total is not None else "—"
+    total_val = get_best_total_amount(est)
+    total = format_money(total_val) if total_val is not None else "—"
     lines = [f"*Estimate {eid}*", f"Status: {status}", f"Total: {total}"]
     return "\n".join(lines)
 
@@ -262,8 +318,8 @@ def format_services_list(data: Any) -> str:
         obj = s if isinstance(s, dict) else {}
         name = _safe(obj.get("name"))
         price = obj.get("price") or obj.get("amount")
-        price = f" — ${price}" if price is not None else ""
-        lines.append(f"• {name}{price}")
+        price_str = " — " + format_money(price) if price is not None else ""
+        lines.append(f"• {name}{price_str}")
     return "\n".join(lines)
 
 
@@ -278,14 +334,14 @@ def format_materials_list(data: Any) -> str:
         obj = m if isinstance(m, dict) else {}
         name = _safe(obj.get("name"))
         price = obj.get("price") or obj.get("amount")
-        price = f" — ${price}" if price is not None else ""
-        lines.append(f"• {name}{price}")
+        price_str = " — " + format_money(price) if price is not None else ""
+        lines.append(f"• {name}{price_str}")
     return "\n".join(lines)
 
 
 # ---- Appointments / schedule ----
-def format_appointments_list(data: Any, date_label: str = "scheduled") -> str:
-    """Format list of appointments."""
+def format_appointments_list(data: Any, date_label: str = "scheduled", tz_name: str = DEFAULT_USER_TZ) -> str:
+    """Format list of appointments. Times in user TZ."""
     appointments = _list(data)
     if not appointments:
         return f"No appointments found for {_escape_md(date_label)}."
@@ -293,13 +349,14 @@ def format_appointments_list(data: Any, date_label: str = "scheduled") -> str:
     lines = [f"*Appointments for {_escape_md(date_label)}:*"]
     for a in appointments[:25]:
         obj = a if isinstance(a, dict) else {}
-        time = _safe(obj.get("scheduled_start") or obj.get("scheduled_start_date"))
+        ts = obj.get("scheduled_start") or obj.get("scheduled_start_date")
+        time_str = format_single_time(ts, tz_name=tz_name) if ts else _safe(ts)
         job_id = obj.get("job_id") or obj.get("job", {}).get("id") if isinstance(obj.get("job"), dict) else None
         pro = obj.get("pro") or obj.get("technician")
         if isinstance(pro, dict):
             pro = pro.get("display_name") or pro.get("name")
         pro = _safe(pro)
-        lines.append(f"• {time} — Job {job_id or '?'} — {pro}")
+        lines.append(f"• {time_str} — Job {job_id or '?'} — {pro}")
     return "\n".join(lines)
 
 

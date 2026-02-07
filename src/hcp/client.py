@@ -7,12 +7,17 @@ This module must not implement POST, PATCH, PUT, or DELETE. All data access
 is read-only for the Polar Air admin chatbot.
 """
 import os
+import time
 from typing import Any, Optional
 
 import httpx
 
 # Enforce read-only: only GET is allowed. Do not add write methods.
 ALLOWED_METHODS = frozenset({"GET"})
+
+DEFAULT_TIMEOUT = 30.0
+DEFAULT_MAX_RETRIES = 2
+RETRY_BACKOFF = 1.0
 
 
 class HCPClientError(Exception):
@@ -24,20 +29,22 @@ class HCPClientError(Exception):
 
 
 class HCPClient:
-    """Read-only client for Housecall Pro API. Uses Bearer token auth."""
+    """Read-only client for Housecall Pro API. Uses Bearer token auth, retries, timeouts."""
 
     def __init__(
         self,
         *,
         base_url: str = "https://api.housecallpro.com",
         token: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ):
         self.base_url = base_url.rstrip("/")
         self._token = token or os.getenv("HCP_API_KEY")
         if not self._token:
             raise ValueError("HCP API token required: set HCP_API_KEY or pass token=")
         self._timeout = timeout
+        self._max_retries = max(0, max_retries)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -48,16 +55,30 @@ class HCPClient:
 
     async def get(self, path: str, params: Optional[dict[str, Any]] = None) -> Any:
         """
-        Perform a GET request. Only GET is allowed (read-only).
+        Perform a GET request with retries. Only GET is allowed (read-only).
         path: e.g. "/v1/jobs" (leading slash optional).
         Returns parsed JSON or raises HCPClientError.
         """
         if "GET" not in ALLOWED_METHODS:
             raise HCPClientError("Read-only client: GET is the only allowed method")
         url = f"{self.base_url}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.get(url, headers=self._headers(), params=params or {})
-        return self._handle_response(response)
+        last_error = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.get(url, headers=self._headers(), params=params or {})
+                return self._handle_response(response)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_error = e
+                if attempt < self._max_retries:
+                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                else:
+                    raise HCPClientError(
+                        f"Request failed after {self._max_retries + 1} attempts: {e!s}"
+                    ) from e
+        if last_error:
+            raise HCPClientError(str(last_error)) from last_error
+        raise HCPClientError("Request failed")
 
     def _handle_response(self, response: httpx.Response) -> Any:
         if response.status_code == 401:

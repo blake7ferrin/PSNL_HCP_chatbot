@@ -45,18 +45,53 @@ Internal read-only Telegram bot for Polar Air admin staff. Answers questions abo
 | `ALLOWED_TELEGRAM_IDS` | No | Comma-separated Telegram user IDs; if set, only these users can use the bot |
 | `OPENAI_API_KEY` or `OPENROUTER_API_KEY` | No | If set, job-list answers use an LLM for natural-language summaries (OpenRouter preferred if both set) |
 | `LLM_MODEL` | No | Model name (default: `gpt-4o-mini` for OpenAI; `openai/gpt-4o-mini` for OpenRouter) |
+| `LLM_SUMMARIES_ENABLED` | No | Set to `0` or `false` to disable LLM summaries (deterministic formatting only) |
+| `COMPOSE_TONE` | No | Response tone: `neutral_professional`, `witty_confident`, or `minimalist` |
 
 ## Capabilities
 
 The bot is **read-only**. It can answer questions about:
 
-- **Jobs** – list jobs, job details (e.g. "today's jobs", "job 12345")
+- **Jobs** – list jobs by date range (e.g. "today", "next week", "any day next week", "Tuesday"), job details by ID or "the second one"
 - **Estimates** – list estimates, estimate details
 - **Customers** – list customers, customer details
 - **Company** – company info (if supported by API)
 - **Pricebook** – services/materials (if supported by API)
-- **Schedule** – appointments/technicians (if supported by API)
+- **Schedule** – same as jobs list for a date range
+- **Stats** – quick counts (jobs today, this week, estimates, customers)
 
 No create, update, or delete operations are performed.
 
 For exact API endpoint paths and response shapes, see the [Housecall Pro Public API documentation](https://docs.housecallpro.com/).
+
+---
+
+## How intent routing works
+
+User messages are mapped to **intents** (e.g. `jobs.list`, `job.get`, `estimates.list`, `help`) by the **router** in `src/intents/router.py`. The router is **deterministic**: it uses keyword/phrase rules and regex, not an LLM.
+
+1. **Input**: Raw message text + optional **context** from per-chat memory (last intent, last date range, last list of entity IDs).
+2. **Order of checks**: Help → get-by-id (job, estimate, customer) → "the second one" resolution from last list → date range + jobs/schedule → stats → company → pricebook → estimates → customers → jobs (default today) → unknown.
+3. **Date parsing**: Phrases like "today", "next week", "this weekend", "Tuesday" (or "what about Tuesday?" after "next week") are parsed in `src/intents/dateparse.py` into a start/end date in the user’s timezone (default `America/Phoenix`).
+4. **Output**: An `Intent` (name + optional filters like date range, optional entity_id for get-by-id). Handlers in `src/telegram/handlers.py` call the HCP API and the compose layer to format the reply.
+
+---
+
+## How to add a new intent
+
+1. **Schema** (`src/intents/schema.py`): Add a constant, e.g. `INTENT_MY_FEATURE = "my_feature"`.
+2. **Router** (`src/intents/router.py`): Add keyword/phrase checks and return `Intent(INTENT_MY_FEATURE, ...)` in the right place (before the generic fallbacks). If the intent needs a date range, use `parse_human_date(...)` and set `filters.start_date` / `filters.end_date`.
+3. **Handler** (`src/telegram/handlers.py`): In `_dispatch()`, add a branch for `intent.name == INTENT_MY_FEATURE`: call the right HCP module (or `src/hcp/endpoints.py`), then format the reply (e.g. via `src/compose/formatter.py` or `src/bot/responses.py`).
+4. **Optional**: Add a tone phrase in `src/compose/templates.py` and use it in the formatter. Add Ops Coach suggestions in `src/compose/suggestions.py` if the response is a list.
+
+---
+
+## How to configure tone profile
+
+Set the env var **`COMPOSE_TONE`** to one of:
+
+- **`neutral_professional`** (default) – e.g. "No jobs found for that period.", "Suggested next steps:"
+- **`witty_confident`** – e.g. "Nothing on the board for that range.", "Want to dig deeper? Try:"
+- **`minimalist`** – e.g. "No jobs.", "Next:"
+
+Phrases are defined in `src/compose/templates.py`. Only a few strings are tone-dependent (no-results message, next-actions header, greeting); the rest of the reply is the same. To add a new profile, add an entry to the `_PROFILES` dict and use `get_phrase(key)` in the formatter.
