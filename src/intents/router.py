@@ -218,21 +218,21 @@ def route(
 
     # ---- job.get by id: "job 12345", "get job 456" (not "jobs today" -> id "s") ----
     job_id = _extract_id(user_text, "job")
-    if job_id and len(job_id) >= 2 and (job_id.isdigit() or job_id.replace("-", "").isalnum()):
+    if job_id:
         if not _is_valid_entity_id("job", job_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a job ID."})
         return Intent(INTENT_JOB_GET, entity_id=job_id)
 
     # ---- estimate.get by id ----
     estimate_id = _extract_id(user_text, "estimate")
-    if estimate_id and len(estimate_id) >= 2 and (estimate_id.isdigit() or estimate_id.isalnum()):
+    if estimate_id:
         if not _is_valid_entity_id("estimate", estimate_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like an estimate ID."})
         return Intent(INTENT_ESTIMATE_GET, entity_id=estimate_id)
 
     # ---- customer.get by id ----
     customer_id = _extract_id(user_text, "customer")
-    if customer_id and len(customer_id) >= 2 and (customer_id.isdigit() or customer_id.isalnum()):
+    if customer_id:
         if not _is_valid_entity_id("customer", customer_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a customer ID."})
         return Intent(INTENT_CUSTOMER_GET, entity_id=customer_id)
