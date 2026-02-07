@@ -29,13 +29,16 @@ def main() -> None:
         print("TELEGRAM_BOT_TOKEN: set (length {})".format(len(token)))
 
     hcp_key = os.getenv("HCP_API_KEY", "").strip()
-    hcp_base = os.getenv("HCP_API_BASE_URL", "").strip() or "https://api.housecallpro.com"
+    from src.hcp.config import get_hcp_config
+    cfg = get_hcp_config()
+    hcp_base = cfg.base_url
     if not hcp_key:
         print("HCP_API_KEY: not set (bot will fail on jobs/estimates/customers)")
         ok = False
     else:
         print("HCP_API_KEY: set (length {})".format(len(hcp_key)))
     print("HCP_API_BASE_URL: {}".format(hcp_base))
+    print("HCP_API_PREFIX: {}".format(cfg.api_prefix or "(public)"))
 
     # Access control
     allowed = os.getenv("ALLOWED_TELEGRAM_IDS", "").strip()
@@ -62,48 +65,24 @@ def main() -> None:
         print("\nFix missing vars in Doppler or .env, then run again.")
         sys.exit(1)
 
-    # HCP API check: try actual root paths first (docs use e.g. /customers/{id}/addresses, no /v1)
+    # HCP API check: use explicit discovery probe
     if hcp_key:
         async def ping_hcp() -> bool:
-            from src.hcp.client import HCPClientError
-            from src.hcp.endpoints import _client
-            client = _client()
-            # Real paths from HCP docs: base is api.housecallpro.com, resources at /company, /jobs, /estimates, /customers
-            candidates = [
-                ("company", {}),
-                ("jobs", {"per_page": 1}),
-                ("estimates", {"per_page": 1}),
-                ("customers", {"per_page": 1}),
-            ]
-            print("\nPinging Housecall Pro API (root paths first)...")
-            any_ok = False
-            for path, params in candidates:
-                try:
-                    out = await client.get(path, params=params)
-                    code = 200
-                    snippet = ""
-                    if isinstance(out, dict):
-                        keys = list(out.keys())[:3]
-                        snippet = " keys=" + ",".join(str(k) for k in keys)
-                    elif isinstance(out, list):
-                        snippet = " len={}".format(len(out))
-                    print("  {} {} -> {} (OK){}".format(path, params or "", code, snippet))
-                    any_ok = True
-                except HCPClientError as e:
-                    code = getattr(e, "status_code", None) or "?"
-                    body = (getattr(e, "body", None) or "")[:80]
-                    if body:
-                        body = body.replace("\n", " ").strip()
-                    print("  {} -> {}  {}".format(path, code, body or ""))
-                    if code == 401:
-                        print("HCP API: 401 Unauthorized (invalid or expired API key; check Token vs Bearer)")
-                        return False
-                except Exception as e:
-                    print("  {} -> {}  {}".format(path, type(e).__name__, str(e)[:60]))
-            if not any_ok:
-                print("  No path returned 200. If all 404: wrong paths or auth masked as 404.")
-                return False
-            return True
+            from src.hcp.discovery import probe_endpoints
+            print("\nPinging Housecall Pro API (configured prefix only)...")
+            result = await probe_endpoints()
+            if result.ok:
+                print("  Probe OK (prefix={})".format(cfg.api_prefix or "public"))
+                return True
+            if result.reason == "auth":
+                print("  HCP API: 401 Unauthorized (invalid or expired API key)")
+            elif result.reason == "endpoint_not_found":
+                print("  HCP API: endpoint not found (check MAX plan, base URL, or prefix)")
+            elif result.reason == "rate_limited":
+                print("  HCP API: rate limit hit")
+            else:
+                print("  HCP API: probe failed (reason={})".format(result.reason))
+            return False
 
         if not asyncio.run(ping_hcp()):
             ok = False
