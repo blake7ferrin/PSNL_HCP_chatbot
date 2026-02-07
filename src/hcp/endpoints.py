@@ -4,13 +4,31 @@ Endpoint paths and semantics follow the official API reference:
 https://docs.housecallpro.com/ (Housecall Pro Public API)
 """
 from typing import Any, Optional
+import logging
 
 from .client import HCPClient, HCPClientError
+from .config import HCPConfig, build_path, get_hcp_config
+
+logger = logging.getLogger(__name__)
 
 
 # Default client instance (token from env). Caller can inject a client for tests.
-def _client() -> HCPClient:
-    return HCPClient()
+def _client_and_config(client: Optional[HCPClient] = None) -> tuple[HCPClient, HCPConfig]:
+    cfg = get_hcp_config()
+    return (client or HCPClient(base_url=cfg.base_url), cfg)
+
+
+def _path(resource: str, cfg: HCPConfig) -> str:
+    return build_path(resource, config=cfg)
+
+
+def _raise_not_found(resource: str, err: HCPClientError) -> None:
+    logger.warning("hcp endpoint not found for resource=%s status=%s", resource, err.status_code)
+    raise HCPClientError(
+        "HCP endpoint not found for this account. Check API plan (MAX) and base URL.",
+        status_code=err.status_code,
+        body=err.body,
+    ) from err
 
 
 def _job_start_date_str(obj: dict) -> Optional[str]:
@@ -62,15 +80,6 @@ def _list_from_response(data: Any) -> list:
     return []
 
 
-# Paths to try: HCP Public API uses root paths (e.g. /jobs, /customers/{id}/addresses), no /v1 prefix
-_JOBS_PATHS = ("jobs", "housecall/v1/jobs", "v1/jobs", "api/v1/jobs")
-
-
-async def _get_jobs_raw(c: HCPClient, path: str, params: Optional[dict]) -> Any:
-    """GET jobs from one path. Raises HCPClientError on failure."""
-    return await c.get(path, params=params)
-
-
 async def list_jobs(
     client: Optional[HCPClient] = None,
     scheduled_start_date: Optional[str] = None,
@@ -79,7 +88,7 @@ async def list_jobs(
     per_page: Optional[int] = None,
 ) -> Any:
     """List jobs. Date filter is always applied client-side (API often 404s with date param)."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if status is not None:
         params["status"] = status
@@ -87,48 +96,33 @@ async def list_jobs(
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
-    last_error = None
-    for path in _JOBS_PATHS:
-        try:
-            out = await _get_jobs_raw(c, path, params if params else None)
-            if scheduled_start_date is not None:
-                all_jobs = _list_from_response(out)
-                matched = _jobs_matching_date(out, scheduled_start_date)
-                if isinstance(out, dict):
-                    out = {**out, "jobs": matched, "total_fetched": len(all_jobs)}
-                else:
-                    out = {"jobs": matched, "total_fetched": len(all_jobs)}
-            return out
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise HCPClientError("Housecall Pro jobs endpoint not found (tried multiple paths).")
-
-
-# Paths to try for single job GET (same variants as list)
-_JOB_DETAIL_PATHS = ("jobs/{id}", "housecall/v1/jobs/{id}", "v1/jobs/{id}", "api/v1/jobs/{id}")
+    path = _path("jobs", cfg)
+    try:
+        out = await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("jobs", e)
+        raise
+    if scheduled_start_date is not None:
+        all_jobs = _list_from_response(out)
+        matched = _jobs_matching_date(out, scheduled_start_date)
+        if isinstance(out, dict):
+            out = {**out, "jobs": matched, "total_fetched": len(all_jobs)}
+        else:
+            out = {"jobs": matched, "total_fetched": len(all_jobs)}
+    return out
 
 
 async def get_job(job_id: str, client: Optional[HCPClient] = None) -> Any:
-    """Get a single job by id. Tries multiple API path variants on 404."""
-    c = client or _client()
-    last_error = None
-    for path_tpl in _JOB_DETAIL_PATHS:
-        path = path_tpl.format(id=job_id)
-        try:
-            return await c.get(path)
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise HCPClientError(f"Housecall Pro job {job_id} not found (tried multiple paths).")
+    """Get a single job by id."""
+    c, cfg = _client_and_config(client)
+    path = _path(f"jobs/{job_id}", cfg)
+    try:
+        return await c.get(path)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("jobs", e)
+        raise
 
 
 async def count_jobs_in_date_range(
@@ -165,11 +159,6 @@ async def list_jobs_in_date_range(
     return {"jobs": filtered, "total_fetched": len(jobs)}
 
 
-# ---- Estimates (root paths first per HCP Public API) ----
-_ESTIMATES_PATHS = ("estimates", "housecall/v1/estimates", "v1/estimates", "api/v1/estimates")
-_ESTIMATE_DETAIL_PATHS = ("estimates/{id}", "housecall/v1/estimates/{id}", "v1/estimates/{id}", "api/v1/estimates/{id}")
-
-
 async def list_estimates(
     client: Optional[HCPClient] = None,
     page: Optional[int] = None,
@@ -179,7 +168,7 @@ async def list_estimates(
     """List estimates with optional pagination and status filter.
     When status is set, fetches estimates and filters client-side by estimate.status.
     """
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if page is not None:
         params["page"] = page
@@ -187,66 +176,34 @@ async def list_estimates(
         params["per_page"] = per_page
     if not params and status:
         params["per_page"] = 500
-    last_error = None
-    for path in _ESTIMATES_PATHS:
-        try:
-            out = await c.get(path, params=params if params else None)
-            if status and out:
-                estimates = _list_from_response(out)
-                status_lower = status.lower()
-                filtered = [e for e in estimates if (e.get("status") or "").lower() == status_lower]
-                if isinstance(out, dict):
-                    out = {**out, "estimates": filtered}
-                else:
-                    out = {"estimates": filtered}
-            return out
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise HCPClientError("Housecall Pro estimates endpoint not found (tried multiple paths).")
+    path = _path("estimates", cfg)
+    try:
+        out = await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("estimates", e)
+        raise
+    if status and out:
+        estimates = _list_from_response(out)
+        status_lower = status.lower()
+        filtered = [e for e in estimates if (e.get("status") or "").lower() == status_lower]
+        if isinstance(out, dict):
+            out = {**out, "estimates": filtered}
+        else:
+            out = {"estimates": filtered}
+    return out
 
 
 async def get_estimate(estimate_id: str, client: Optional[HCPClient] = None) -> Any:
-    """Get a single estimate by id. Tries Housecall v1 API path variants on 404."""
-    c = client or _client()
-    last_error = None
-    for path_tpl in _ESTIMATE_DETAIL_PATHS:
-        path = path_tpl.format(id=estimate_id)
-        try:
-            return await c.get(path)
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise HCPClientError(f"Housecall Pro estimate {estimate_id} not found (tried multiple paths).")
-
-
-# ---- Customers (root paths first per HCP Public API) ----
-_CUSTOMERS_PATHS = ("customers", "housecall/v1/customers", "v1/customers", "api/v1/customers")
-_CUSTOMER_DETAIL_PATHS = ("customers/{id}", "housecall/v1/customers/{id}", "v1/customers/{id}", "api/v1/customers/{id}")
-
-
-async def _get_first_ok(c: HCPClient, paths: tuple[str, ...], **kwargs: Any) -> Any:
-    """GET from first path that succeeds; on 404 try next. Raises last HCPClientError if all 404."""
-    last_error = None
-    for path in paths:
-        try:
-            return await c.get(path, **kwargs)
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise HCPClientError("Endpoint not found (tried multiple paths).")
+    """Get a single estimate by id."""
+    c, cfg = _client_and_config(client)
+    path = _path(f"estimates/{estimate_id}", cfg)
+    try:
+        return await c.get(path)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("estimates", e)
+        raise
 
 
 async def list_customers(
@@ -255,43 +212,43 @@ async def list_customers(
     per_page: Optional[int] = None,
 ) -> Any:
     """List customers with optional pagination."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if page is not None:
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
-    return await _get_first_ok(c, _CUSTOMERS_PATHS, params=params if params else None)
+    path = _path("customers", cfg)
+    try:
+        return await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("customers", e)
+        raise
 
 
 async def get_customer(customer_id: str, client: Optional[HCPClient] = None) -> Any:
-    """Get a single customer by id. Tries Housecall v1 API path variants on 404."""
-    c = client or _client()
-    paths = tuple(p.format(id=customer_id) for p in _CUSTOMER_DETAIL_PATHS)
-    return await _get_first_ok(c, paths)
-
-
-# ---- Company / organization (root path first per HCP Public API) ----
-_COMPANY_PATHS = ("company", "housecall/v1/company", "v1/company", "api/v1/company")
+    """Get a single customer by id."""
+    c, cfg = _client_and_config(client)
+    path = _path(f"customers/{customer_id}", cfg)
+    try:
+        return await c.get(path)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("customers", e)
+        raise
 
 
 async def get_company(client: Optional[HCPClient] = None) -> Any:
     """Get company/organization info. May 404 if not in API."""
-    c = client or _client()
-    last_error = None
-    for path in _COMPANY_PATHS:
-        try:
-            return await c.get(path)
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    return {}  # all 404 -> return empty
-
-
-# ---- Employees (root path first; glossary: "Employee" = field techs & office admins) ----
-_EMPLOYEES_PATHS = ("employees", "housecall/v1/employees", "v1/employees", "api/v1/employees")
+    c, cfg = _client_and_config(client)
+    path = _path("company", cfg)
+    try:
+        return await c.get(path)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("company", e)
+        raise
 
 
 async def list_employees(
@@ -300,31 +257,23 @@ async def list_employees(
     per_page: Optional[int] = None,
 ) -> Any:
     """List employees (field techs and office staff). May 404 if not in plan."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if page is not None:
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
-    last_error = None
-    for path in _EMPLOYEES_PATHS:
-        try:
-            return await c.get(path, params=params if params else None)
-        except HCPClientError as e:
-            last_error = e
-            if e.status_code == 404:
-                continue
-            raise
-    return {}
+    path = _path("employees", cfg)
+    try:
+        return await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("employees", e)
+        raise
 
 
 # Backward-compatible alias (HCP docs use "Employee")
 list_pros = list_employees
-
-
-# ---- Pricebook (root paths first: services / materials) ----
-_SERVICES_PATHS = ("services", "housecall/v1/services", "v1/services", "api/v1/services")
-_MATERIALS_PATHS = ("materials", "housecall/v1/materials", "v1/materials", "api/v1/materials")
 
 
 async def list_services(
@@ -333,16 +282,19 @@ async def list_services(
     per_page: Optional[int] = None,
 ) -> Any:
     """List pricebook services. May 404 if endpoint name differs in API."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if page is not None:
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
+    path = _path("services", cfg)
     try:
-        return await _get_first_ok(c, _SERVICES_PATHS, params=params if params else None)
-    except HCPClientError:
-        return {}
+        return await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("services", e)
+        raise
 
 
 async def list_materials(
@@ -351,20 +303,19 @@ async def list_materials(
     per_page: Optional[int] = None,
 ) -> Any:
     """List pricebook materials. May 404 if endpoint name differs in API."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if page is not None:
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
+    path = _path("materials", cfg)
     try:
-        return await _get_first_ok(c, _MATERIALS_PATHS, params=params if params else None)
-    except HCPClientError:
-        return {}
-
-
-# ---- Appointments / schedule (root path first) ----
-_APPOINTMENTS_PATHS = ("appointments", "housecall/v1/appointments", "v1/appointments", "api/v1/appointments")
+        return await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("materials", e)
+        raise
 
 
 async def list_appointments(
@@ -374,7 +325,7 @@ async def list_appointments(
     per_page: Optional[int] = None,
 ) -> Any:
     """List appointments/schedule. May 404 if endpoint name differs in API."""
-    c = client or _client()
+    c, cfg = _client_and_config(client)
     params: dict[str, Any] = {}
     if scheduled_start_date is not None:
         params["scheduled_start_date"] = scheduled_start_date
@@ -382,7 +333,10 @@ async def list_appointments(
         params["page"] = page
     if per_page is not None:
         params["per_page"] = per_page
+    path = _path("appointments", cfg)
     try:
-        return await _get_first_ok(c, _APPOINTMENTS_PATHS, params=params if params else None)
-    except HCPClientError:
-        return {}
+        return await c.get(path, params=params if params else None)
+    except HCPClientError as e:
+        if e.status_code == 404:
+            _raise_not_found("appointments", e)
+        raise

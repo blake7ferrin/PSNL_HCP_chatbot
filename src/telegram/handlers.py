@@ -24,9 +24,10 @@ from src.intents.schema import (
     INTENT_STATS,
     INTENT_HELP,
     INTENT_AGGREGATION_UNSUPPORTED,
+    INTENT_CONFIRM,
     INTENT_UNKNOWN,
 )
-from src.memory import get_chat_memory
+from src.memory import AnchorDateRange, PendingAction, get_chat_memory, save_chat_memory
 from src.hcp.client import HCPClientError
 from src.hcp import jobs as hcp_jobs
 from src.hcp import estimates as hcp_estimates
@@ -34,6 +35,8 @@ from src.hcp import customers as hcp_customers
 from src.hcp import pricebook as hcp_pricebook
 from src.hcp import company as hcp_company
 from src.hcp import endpoints  # for list_appointments, list_employees, count_jobs_in_date_range
+from src.hcp.config import get_hcp_config
+from src.hcp.discovery import probe_endpoints
 from src.compose.formatter import (
     format_jobs_list_by_day,
     format_help_message,
@@ -41,8 +44,10 @@ from src.compose.formatter import (
     format_aggregation_unsupported,
     extract_job_ids_from_list,
 )
-from src.compose.templates import get_phrase
 from src.bot import responses  # legacy format_* for estimates/customers/company/pricebook/error
+from src.metrics.daily import record_jobs_list, record_estimates_list
+from src.memory.sqlite_store import get_db_status
+from src.utils.logging_utils import log_event
 
 
 def _is_llm_summaries_enabled() -> bool:
@@ -93,12 +98,73 @@ async def handle_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report env, HCP probe, and DB status (safe, no secrets)."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_allowed(user_id):
+        await update.message.reply_text(_denial_message())
+        return
+    cfg = get_hcp_config()
+    token_set = bool(os.getenv("TELEGRAM_BOT_TOKEN"))
+    hcp_set = bool(os.getenv("HCP_API_KEY"))
+    probe = None
+    if hcp_set:
+        probe = await probe_endpoints()
+    db_status = get_db_status()
+    lines = [
+        "*Health*",
+        "• Bot: ok",
+        f"• Telegram token: {'set' if token_set else 'missing'}",
+        f"• HCP API key: {'set' if hcp_set else 'missing'}",
+        f"• HCP base URL: {cfg.base_url}",
+        f"• HCP prefix: {cfg.api_prefix or 'public'}",
+    ]
+    if probe:
+        status = "ok" if probe.ok else probe.reason
+        lines.append(f"• HCP probe: {status}")
+    else:
+        lines.append("• HCP probe: skipped (missing API key)")
+    if db_status.get("ok"):
+        lines.append(f"• DB: ok (schema v{db_status.get('schema_version', 0)})")
+    else:
+        lines.append("• DB: error")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 def _filters_to_dates(f: IntentFilters) -> tuple[str | None, str | None]:
     start = f.start_date
     end = f.end_date or start
     if start is None:
         return None, None
     return start.isoformat() if isinstance(start, date) else str(start), (end.isoformat() if isinstance(end, date) else str(end)) if end else None
+
+
+def _pending_action_for_aggregation(f: IntentFilters) -> PendingAction | None:
+    if not f.start_date:
+        return None
+    end = f.end_date or f.start_date
+    params = {
+        "start_date": f.start_date.isoformat(),
+        "end_date": end.isoformat(),
+        "date_label": f.date_label or "",
+    }
+    return PendingAction(intent_type=INTENT_JOBS_LIST, params=params, label=f.date_label or None)
+
+
+def _intent_from_pending_action(action: PendingAction) -> Intent:
+    if action.intent_type == INTENT_JOBS_LIST:
+        filters = IntentFilters()
+        start_raw = action.params.get("start_date")
+        end_raw = action.params.get("end_date")
+        if start_raw:
+            filters.start_date = date.fromisoformat(str(start_raw))
+        if end_raw:
+            filters.end_date = date.fromisoformat(str(end_raw))
+        filters.date_label = action.params.get("date_label") or None
+        return Intent(INTENT_JOBS_LIST, filters=filters)
+    return Intent(INTENT_UNKNOWN, confidence=0.0)
 
 
 # Reference phrases that refer to the last list/job (conversation anchor)
@@ -160,38 +226,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     memory = get_chat_memory(str(chat_id))
     ctx = memory.to_context()
     # Pre-route: inject resolved_entity when user references last job and we have anchor
-    anchor = memory.get_anchor()
-    if _should_inject_resolved_entity(text, anchor):
-        date_range = anchor.get("date_range")
-        if date_range and isinstance(date_range, (list, tuple)) and len(date_range) >= 2:
-            s, e = date_range[0], date_range[1]
-            ctx["resolved_entity"] = {
-                "type": anchor.get("type") or "job",
-                "ids": list(anchor.get("ids") or []),
-                "date_range": (s, e),
-            }
+    anchor = memory.last_anchor.to_dict() if memory.last_anchor else None
+    if _should_inject_resolved_entity(text, anchor or {}):
+        date_range = anchor.get("date_range") if anchor else None
+        if isinstance(date_range, dict):
+            s, e = date_range.get("start"), date_range.get("end")
         else:
-            ctx["resolved_entity"] = {
-                "type": anchor.get("type") or "job",
-                "ids": list(anchor.get("ids") or []),
-                "date_range": None,
-            }
+            s, e = None, None
+        ctx["resolved_entity"] = {
+            "type": (anchor or {}).get("type") or "job",
+            "ids": list((anchor or {}).get("ids") or []),
+            "date_range": (s, e) if s and e else None,
+        }
     elif any(p in text.lower() for p in _REFERENCE_PHRASES) and not anchor:
         ctx["reference_phrase_used"] = True
     intent = route(text, context=ctx, tz_name=memory.timezone)
-    logger.debug("message=%r -> intent=%s entity_id=%s filters=%s", text[:80], intent.name, getattr(intent, "entity_id", None), getattr(intent.filters, "date_label", None) or getattr(intent.filters, "status", None))
+    log_event(
+        logger,
+        "intent_routed",
+        level=logging.DEBUG,
+        chat_id=str(chat_id),
+        intent=intent.name,
+        entity_id=getattr(intent, "entity_id", None),
+        date_label=getattr(intent.filters, "date_label", None),
+        status=getattr(intent.filters, "status", None),
+        has_anchor=bool(memory.last_anchor),
+    )
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     tz_name = memory.timezone
+    # Confirm intent: execute pending action if present
+    if intent.name == INTENT_CONFIRM:
+        if memory.pending_action:
+            pending = memory.pending_action
+            memory.clear_pending_action()
+            intent = _intent_from_pending_action(pending)
+        else:
+            reply = "What should I do next? Try: _Jobs today_ or _Jobs next week_."
+            use_markdown = True
+            entity_ids = None
+            save_chat_memory(memory)
+            try:
+                await update.message.reply_text(reply, parse_mode="Markdown")
+            except Exception as e:
+                logger.exception("Failed to send reply: %s", e)
+            return
+
+    # Clear pending action on new non-confirm intents
+    if intent.name != INTENT_CONFIRM and memory.pending_action:
+        memory.clear_pending_action()
+
     try:
         reply, use_markdown, entity_ids = await _dispatch(intent, text, tz_name=tz_name)
     except HCPClientError as e:
-        reply = responses.format_error(str(e))
-        use_markdown = True
+        log_event(logger, "hcp_error", level=logging.WARNING, error=str(e), status_code=getattr(e, "status_code", None))
+        if getattr(e, "status_code", None) == 429:
+            reply = "HCP rate limit hit, try again shortly."
+            use_markdown = False
+        else:
+            reply = responses.format_error(str(e))
+            use_markdown = True
         entity_ids = None
     except Exception as e:
-        logger.exception("Handler error: %s", e)
+        log_event(logger, "handler_error", level=logging.ERROR, error=str(e))
         reply = responses.format_error(str(e))
         use_markdown = True
         entity_ids = None
@@ -200,7 +298,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if entity_ids is not None and intent.name == INTENT_JOBS_LIST:
         start_d = intent.filters.start_date
         end_d = intent.filters.end_date or start_d
-        date_range = (start_d, end_d) if start_d and end_d else None
+        date_range = AnchorDateRange(start=start_d, end=end_d) if start_d and end_d else None
         memory.set_anchor(
             "job",
             ids=entity_ids,
@@ -235,10 +333,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ):
         memory.clear_anchor()
 
+    # Pending action for aggregation clarifications
+    if intent.name == INTENT_AGGREGATION_UNSUPPORTED:
+        pending = _pending_action_for_aggregation(intent.filters)
+        memory.set_pending_action(pending)
+
+    save_chat_memory(memory)
     try:
         await update.message.reply_text(reply or "Something went wrong.", parse_mode="Markdown" if use_markdown else None)
     except Exception as e:
-        logger.exception("Failed to send reply: %s", e)
+        log_event(logger, "reply_send_failed", level=logging.ERROR, error=str(e))
         try:
             await update.message.reply_text("Something went wrong. Check the bot logs.")
         except Exception:
@@ -284,6 +388,7 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
             data = await hcp_jobs.list_jobs(scheduled_start_date=start_iso or None)
         jobs_list = _list_from_response(data)
         logger.debug("jobs.list: response keys=%s jobs_count=%d", list(data.keys()) if isinstance(data, dict) else "raw", len(jobs_list))
+        record_jobs_list(len(jobs_list))
         ids = extract_job_ids_from_list(data)
         reply = format_jobs_list_by_day(data, date_label, include_suggestions=True, tz_name=tz_name)
         return reply, True, ids
@@ -304,6 +409,8 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
     if intent.name == INTENT_ESTIMATES_LIST:
         status_filter = intent.filters.status if intent.filters else None
         data = await hcp_estimates.list_estimates(status=status_filter)
+        estimates_list = _list_from_response(data)
+        record_estimates_list(len(estimates_list))
         list_label = None
         if status_filter == "unscheduled":
             list_label = "unscheduled estimates"
