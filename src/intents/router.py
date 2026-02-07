@@ -18,6 +18,7 @@ from .schema import (
     INTENT_STATS,
     INTENT_HELP,
     INTENT_AGGREGATION_UNSUPPORTED,
+    INTENT_CONFIRM,
     INTENT_UNKNOWN,
 )
 from .dateparse import parse_human_date, DEFAULT_TZ
@@ -93,6 +94,14 @@ def route(
         return Intent(INTENT_UNKNOWN, confidence=0.0)
 
     normalized = _normalize(user_text)
+
+    # ---- Confirm (yes please / sure / ok) -> execute pending_action; never route to help/unknown ----
+    _CONFIRM_PHRASES = {"yes", "yes please", "sure", "ok", "do it", "sounds good", "yeah", "yep", "please"}
+    _norm_clean = normalized.strip().rstrip(".")
+    if _norm_clean in _CONFIRM_PHRASES:
+        if context.get("pending_action"):
+            return Intent(INTENT_CONFIRM, raw_slots={"pending_action": context["pending_action"]})
+        return Intent(INTENT_CONFIRM)
     last_intent = context.get("last_intent")
     last_start = context.get("last_start_date")
     last_end = context.get("last_end_date")
@@ -125,14 +134,33 @@ def route(
                 focus = "money" if any(k in normalized for k in _TOTAL_KW) else None
                 return Intent(INTENT_JOB_GET, entity_id=re_ids[list_index - 1], focus=focus)
             return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
+        if re_type == "customer":
+            if len(re_ids) == 0:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
+            if len(re_ids) == 1:
+                return Intent(INTENT_CUSTOMER_GET, entity_id=re_ids[0])
+            list_index = _parse_list_index(user_text)
+            if list_index is not None and 1 <= list_index <= len(re_ids):
+                return Intent(INTENT_CUSTOMER_GET, entity_id=re_ids[list_index - 1])
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
+        if re_type == "estimate":
+            if len(re_ids) == 0:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
+            if len(re_ids) == 1:
+                return Intent(INTENT_ESTIMATE_GET, entity_id=re_ids[0])
+            list_index = _parse_list_index(user_text)
+            if list_index is not None and 1 <= list_index <= len(re_ids):
+                return Intent(INTENT_ESTIMATE_GET, entity_id=re_ids[list_index - 1])
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
     # Reference phrase but no anchor (e.g. "that one" with no previous list)
     if context.get("reference_phrase_used"):
         return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
 
-    # ---- "What time is it at?" / time query with last job context ----
+    # ---- "What time is it at?" / time query with last job context (typed: job only) ----
     _TIME_QUERY_KEYWORDS = ("time", "what time", "when", "arrival", "arrival window")
     if any(k in normalized for k in _TIME_QUERY_KEYWORDS):
-        if last_entity_type == "job" and last_entity_id:
+        _anchor = context.get("last_anchor")
+        if _anchor and _anchor.get("type") == "job" and last_entity_id:
             return Intent(INTENT_JOB_TIME, entity_id=last_entity_id)
         return Intent(
             INTENT_UNKNOWN,
@@ -140,11 +168,14 @@ def route(
             raw_slots={"hint": "Which job? Try “time for job <id>” or ask for “next week” first."},
         )
 
-    # ---- "What's the total on that one?" / "details on next week's job?" -> job.get from context ----
+    # ---- "What's the total on that one?" / "details on next week's job?" -> job.get from context (typed: job only) ----
     _DETAILS_TOTAL_KEYWORDS = ("total", "details", "info", "amount")
     _THAT_ONE_PHRASES = ("that one", "the one", "that job", "next week", "next weeks")
+    last_anchor = context.get("last_anchor")
     if (
-        last_intent == INTENT_JOBS_LIST
+        last_anchor
+        and last_anchor.get("type") == "job"
+        and last_intent == INTENT_JOBS_LIST
         and (last_entity_id or last_entity_ids)
         and any(k in normalized for k in _DETAILS_TOTAL_KEYWORDS)
         and any(p in normalized for p in _THAT_ONE_PHRASES)

@@ -25,6 +25,8 @@ class ChatMemory:
     last_entity_id: Optional[str] = None
     timezone: str = DEFAULT_TZ
     last_anchor: Optional[dict[str, Any]] = None
+    # When bot suggests an action ("Want me to list jobs from last week?"), store here; clear after confirm or topic change
+    pending_action: Optional[dict[str, Any]] = None
 
     def to_context(self) -> dict[str, Any]:
         """Export for intent router (date as ISO string for JSON/sqlite)."""
@@ -44,6 +46,7 @@ class ChatMemory:
                 s, e = anchor["date_range"]
                 anchor["date_range"] = (s.isoformat() if hasattr(s, "isoformat") else s, e.isoformat() if hasattr(e, "isoformat") else e)
             out["last_anchor"] = anchor
+        out["pending_action"] = self.pending_action
         return out
 
     def set_anchor(
@@ -54,10 +57,12 @@ class ChatMemory:
         date_range: AnchorDateRange = None,
         label: Optional[str] = None,
     ) -> None:
-        """Set conversation anchor after a successful entity response (jobs list or job get)."""
+        """Set conversation anchor after a successful entity response (jobs list, job get, etc.)."""
+        ids_list = list(ids)
         self.last_anchor = {
             "type": type_name,
-            "ids": list(ids),
+            "id": ids_list[0] if ids_list else None,
+            "ids": ids_list,
             "date_range": date_range,
             "label": label or "",
         }
@@ -72,6 +77,15 @@ class ChatMemory:
     def clear_anchor(self) -> None:
         """Clear anchor when user explicitly changes topic (e.g. customers, estimates, help)."""
         self.last_anchor = None
+        self.pending_action = None
+
+    def set_pending_action(self, action: dict[str, Any]) -> None:
+        """Store suggested action so 'yes please' can execute it."""
+        self.pending_action = action
+
+    def clear_pending_action(self) -> None:
+        """Clear after executing or on topic change."""
+        self.pending_action = None
 
     def update_after_intent(
         self,

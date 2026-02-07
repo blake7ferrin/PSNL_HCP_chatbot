@@ -24,6 +24,7 @@ from src.intents.schema import (
     INTENT_STATS,
     INTENT_HELP,
     INTENT_AGGREGATION_UNSUPPORTED,
+    INTENT_CONFIRM,
     INTENT_UNKNOWN,
 )
 from src.memory import get_chat_memory
@@ -40,6 +41,7 @@ from src.compose.formatter import (
     format_unknown_capabilities,
     format_aggregation_unsupported,
     extract_job_ids_from_list,
+    extract_entity_ids_from_list,
 )
 from src.compose.templates import get_phrase
 from src.bot import responses  # legacy format_* for estimates/customers/company/pricebook/error
@@ -101,41 +103,40 @@ def _filters_to_dates(f: IntentFilters) -> tuple[str | None, str | None]:
     return start.isoformat() if isinstance(start, date) else str(start), (end.isoformat() if isinstance(end, date) else str(end)) if end else None
 
 
-# Reference phrases that refer to the last list/job (conversation anchor)
-_REFERENCE_PHRASES = (
-    "that one",
-    "the one",
-    "that job",
-    "next week's job",
-    "the job next week",
-    "next weeks job",
-    "next weeks",
-)
-# Follow-up intents that implicitly refer to last job when anchor has single id
+# Type-specific reference phrases: only inject when anchor type matches
+_REFERENCE_JOB = ("that job", "the job", "next week's job", "the job next week", "next weeks job", "next weeks")
+_REFERENCE_CUSTOMER = ("that customer", "the customer")
+_REFERENCE_ESTIMATE = ("that estimate", "the estimate")
+_REFERENCE_ANY = ("that one", "the one")  # inject with whatever anchor type we have
+_REFERENCE_PHRASES = _REFERENCE_JOB + _REFERENCE_CUSTOMER + _REFERENCE_ESTIMATE + _REFERENCE_ANY
 _TOTAL_DETAILS_PHRASES = ("total", "details", "info", "amount", "cost", "price", "show job")
-# "Total collected last week" / "our total this week" = period aggregate, not "that job's total"
 _PERIOD_AGGREGATE_PHRASES = ("collected", "revenue", "our total", "we collected", "total for the week", "total for last")
 
 
 def _should_inject_resolved_entity(text: str, anchor: dict) -> bool:
     """
-    True if we should inject resolved_entity into context.
-    - Reference phrase (that one, next week's job, etc.) + anchor exists
-    - OR total/details/amount + anchor exists with exactly 1 job
-    - EXCEPT when user asks for period aggregate (e.g. "total collected last week")
+    True only when reference phrase matches anchor type (job/customer/estimate).
+    "That job" -> anchor.type must be "job". "That one" -> any. Prevents resolving to wrong entity type.
     """
     if not anchor:
         return False
+    anchor_type = anchor.get("type") or "job"
     ids = anchor.get("ids") or []
     lower = text.lower().strip()
     if any(p in lower for p in _PERIOD_AGGREGATE_PHRASES):
         period_words = ("last week", "this week", "next week", "today", "yesterday", "this month", "last month")
         if any(p in lower for p in period_words):
             return False
-    if any(p in lower for p in _REFERENCE_PHRASES):
+    if any(p in lower for p in _REFERENCE_JOB):
+        return anchor_type == "job"
+    if any(p in lower for p in _REFERENCE_CUSTOMER):
+        return anchor_type == "customer"
+    if any(p in lower for p in _REFERENCE_ESTIMATE):
+        return anchor_type == "estimate"
+    if any(p in lower for p in _REFERENCE_ANY):
         return True
     if len(ids) == 1 and any(p in lower for p in _TOTAL_DETAILS_PHRASES):
-        return True
+        return anchor_type == "job"
     return False
 
 
@@ -185,7 +186,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     tz_name = memory.timezone
     try:
-        reply, use_markdown, entity_ids = await _dispatch(intent, text, tz_name=tz_name)
+        reply, use_markdown, entity_ids = await _dispatch(intent, text, memory=memory, tz_name=tz_name)
     except HCPClientError as e:
         reply = responses.format_error(str(e))
         use_markdown = True
@@ -223,11 +224,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif intent.name == INTENT_JOB_GET and intent.entity_id:
         memory.set_anchor("job", [intent.entity_id])
         memory.update_after_intent(intent.name, entity_type="job", entity_id=intent.entity_id)
+    elif intent.name == INTENT_CUSTOMERS_SEARCH and entity_ids is not None:
+        memory.set_anchor("customer", entity_ids)
+        memory.update_after_intent(intent.name)
+    elif intent.name == INTENT_CUSTOMER_GET and intent.entity_id:
+        memory.set_anchor("customer", [intent.entity_id])
+        memory.update_after_intent(intent.name, entity_type="customer", entity_id=intent.entity_id)
+    elif intent.name == INTENT_ESTIMATES_LIST and entity_ids is not None:
+        memory.set_anchor("estimate", entity_ids)
+        memory.update_after_intent(intent.name)
+    elif intent.name == INTENT_ESTIMATE_GET and intent.entity_id:
+        memory.set_anchor("estimate", [intent.entity_id])
+        memory.update_after_intent(intent.name, entity_type="estimate", entity_id=intent.entity_id)
     elif intent.name in (
-        INTENT_ESTIMATES_LIST,
-        INTENT_ESTIMATE_GET,
-        INTENT_CUSTOMERS_SEARCH,
-        INTENT_CUSTOMER_GET,
         INTENT_HELP,
         INTENT_COMPANY_INFO,
         INTENT_PRICEBOOK_SEARCH,
@@ -245,10 +254,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
 
 
-async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "America/Phoenix") -> tuple[str, bool, list[str] | None]:
+def _anchor_type_mismatch_message(expected: str) -> str:
+    """Graceful message when user said e.g. 'that job' but context is customer/estimate."""
+    return "I lost track of the job. Want me to show it again?"
+
+
+async def _dispatch(
+    intent: Intent,
+    user_message: str,
+    *,
+    memory: Any = None,
+    tz_name: str = "America/Phoenix",
+) -> tuple[str, bool, list[str] | None]:
     """Call HCP, format reply. Returns (reply_text, use_markdown, entity_ids or None)."""
     if intent.name == INTENT_HELP:
         return format_help_message(), True, None
+
+    # ---- Confirm: execute pending_action; never route to help/unknown ----
+    if intent.name == INTENT_CONFIRM:
+        pending = (intent.raw_slots or {}).get("pending_action") if intent.raw_slots else None
+        if memory:
+            pending = pending or (memory.pending_action if hasattr(memory, "pending_action") else None)
+        if not pending:
+            return "I'm not sure what to do. Try asking for jobs, estimates, or help.", True, None
+        # Build synthetic intent and run it
+        action_intent = pending.get("intent")
+        action_filters = pending.get("filters")
+        if action_intent == INTENT_JOBS_LIST and action_filters:
+            if memory:
+                memory.clear_pending_action()
+            synthetic = Intent(INTENT_JOBS_LIST, filters=action_filters)
+            return await _dispatch(synthetic, user_message, memory=memory, tz_name=tz_name)
+        if memory:
+            memory.clear_pending_action()
+        return "I'm not sure what to do. Try asking for jobs, estimates, or help.", True, None
 
     if intent.name == INTENT_UNKNOWN:
         clarification = (intent.raw_slots or {}).get("clarification")
@@ -261,16 +300,18 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
             ), True, None
         hint = intent.raw_slots.get("hint") if intent.raw_slots else None
         if hint:
-            return hint + "\n\n" + format_unknown_capabilities(with_buttons_hint=False), True, None
+            return hint, True, None
         return format_unknown_capabilities(with_buttons_hint=False), True, None
 
-    # ---- aggregation unsupported (total collected / revenue for period: explain + alternatives, no job dump) ----
+    # ---- aggregation unsupported: set pending_action so "yes please" lists jobs ----
     if intent.name == INTENT_AGGREGATION_UNSUPPORTED:
         f = intent.filters
         date_label = (f.date_label or "that period").strip() or "that period"
         start_d = getattr(f, "start_date", None)
         end_d = getattr(f, "end_date", None)
         reply = format_aggregation_unsupported(date_label, start_date=start_d, end_date=end_d)
+        if memory and hasattr(memory, "set_pending_action"):
+            memory.set_pending_action({"intent": INTENT_JOBS_LIST, "filters": f})
         return reply, True, None
 
     # ---- jobs.list (always deterministic format so times are in user TZ, no UTC leak) ----
@@ -288,31 +329,41 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
         reply = format_jobs_list_by_day(data, date_label, include_suggestions=True, tz_name=tz_name)
         return reply, True, ids
 
-    # ---- job.get (always use deterministic format for correct money + timezone) ----
+    # ---- job.get (typed anchor: require anchor.type == "job" when entity from context) ----
     if intent.name == INTENT_JOB_GET and intent.entity_id:
+        anchor = memory.get_anchor() if memory else None
+        if anchor and intent.entity_id in (anchor.get("ids") or []) and anchor.get("type") != "job":
+            return _anchor_type_mismatch_message("job"), True, None
         data = await hcp_jobs.get_job(intent.entity_id)
         if getattr(intent, "focus", None) == "money":
             return responses.format_job_total_only(data), True, None
         return responses.format_job_detail(data, tz_name=tz_name), True, None
 
-    # ---- job.time (what time is it at? for last job) ----
+    # ---- job.time (typed: only when anchor is job) ----
     if intent.name == INTENT_JOB_TIME and intent.entity_id:
+        anchor = memory.get_anchor() if memory else None
+        if anchor and intent.entity_id in (anchor.get("ids") or []) and anchor.get("type") != "job":
+            return _anchor_type_mismatch_message("job"), True, None
         data = await hcp_jobs.get_job(intent.entity_id)
         return responses.format_job_time_only(data, tz_name=tz_name), True, None
 
-    # ---- estimates.list ----
+    # ---- estimates.list; return entity_ids for anchor ----
     if intent.name == INTENT_ESTIMATES_LIST:
         status_filter = intent.filters.status if intent.filters else None
         data = await hcp_estimates.list_estimates(status=status_filter)
+        ids = extract_entity_ids_from_list(data)
         list_label = None
         if status_filter == "unscheduled":
             list_label = "unscheduled estimates"
         elif status_filter == "open":
             list_label = "open estimates"
-        return responses.format_estimates_list(data, list_label=list_label), True, None
+        return responses.format_estimates_list(data, list_label=list_label), True, ids
 
-    # ---- estimate.get ----
+    # ---- estimate.get (typed anchor: require anchor.type == "estimate") ----
     if intent.name == INTENT_ESTIMATE_GET and intent.entity_id:
+        anchor = memory.get_anchor() if memory else None
+        if anchor and intent.entity_id in (anchor.get("ids") or []) and anchor.get("type") != "estimate":
+            return "I lost track of the estimate. Want me to show the list again?", True, None
         data = await hcp_estimates.get_estimate(intent.entity_id)
         if _is_llm_summaries_enabled():
             from src import llm
@@ -324,13 +375,17 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
                 logger.debug("estimate.get: LLM returned None, using deterministic format")
         return responses.format_estimate_detail(data), True, None
 
-    # ---- customers.search (list) ----
+    # ---- customers.search (list); return entity_ids for anchor ----
     if intent.name == INTENT_CUSTOMERS_SEARCH:
         data = await hcp_customers.list_customers()
-        return responses.format_customers_list(data), True, None
+        ids = extract_entity_ids_from_list(data)
+        return responses.format_customers_list(data), True, ids
 
-    # ---- customer.get ----
+    # ---- customer.get (typed anchor: require anchor.type == "customer") ----
     if intent.name == INTENT_CUSTOMER_GET and intent.entity_id:
+        anchor = memory.get_anchor() if memory else None
+        if anchor and intent.entity_id in (anchor.get("ids") or []) and anchor.get("type") != "customer":
+            return "I lost track of the customer. Want me to show the list again?", True, None
         data = await hcp_customers.get_customer(intent.entity_id)
         if _is_llm_summaries_enabled():
             from src import llm

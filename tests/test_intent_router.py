@@ -16,6 +16,7 @@ from src.intents.schema import (
     INTENT_STATS,
     INTENT_HELP,
     INTENT_AGGREGATION_UNSUPPORTED,
+    INTENT_CONFIRM,
     INTENT_UNKNOWN,
 )
 
@@ -170,7 +171,11 @@ def test_list_index_without_context_unknown():
 
 
 def test_what_time_with_job_context():
-    ctx = {"last_entity_type": "job", "last_entity_id": "job-123"}
+    ctx = {
+        "last_entity_type": "job",
+        "last_entity_id": "job-123",
+        "last_anchor": {"type": "job", "ids": ["job-123"], "id": "job-123"},
+    }
     r = route("what time is it at?", context=ctx)
     assert r.name == INTENT_JOB_TIME
     assert r.entity_id == "job-123"
@@ -183,14 +188,23 @@ def test_what_time_without_context_unknown():
 
 
 def test_total_on_that_one_with_job_list_context():
-    ctx = {"last_intent": INTENT_JOBS_LIST, "last_entity_id": "job-abc", "last_entity_ids": ["job-abc"]}
+    ctx = {
+        "last_intent": INTENT_JOBS_LIST,
+        "last_entity_id": "job-abc",
+        "last_entity_ids": ["job-abc"],
+        "last_anchor": {"type": "job", "ids": ["job-abc"], "id": "job-abc"},
+    }
     r = route("what's the total on that one?", context=ctx)
     assert r.name == INTENT_JOB_GET
     assert r.entity_id == "job-abc"
 
 
 def test_details_next_weeks_job_with_context():
-    ctx = {"last_intent": INTENT_JOBS_LIST, "last_entity_ids": ["job-xyz"]}
+    ctx = {
+        "last_intent": INTENT_JOBS_LIST,
+        "last_entity_ids": ["job-xyz"],
+        "last_anchor": {"type": "job", "ids": ["job-xyz"], "id": "job-xyz"},
+    }
     r = route("details on next weeks job?", context=ctx)
     assert r.name == INTENT_JOB_GET
     assert r.entity_id == "job-xyz"
@@ -262,3 +276,40 @@ def test_resolved_entity_zero_ids_no_job_clarification():
     r = route("that one", context=ctx)
     assert r.name == INTENT_UNKNOWN
     assert (r.raw_slots or {}).get("clarification") == "no_job"
+
+
+def test_that_job_with_customer_anchor_not_job_get():
+    """'That job' with customer anchor must NOT resolve to job.get (typed anchors)."""
+    ctx = {
+        "last_anchor": {"type": "customer", "ids": ["cust-1"], "id": "cust-1"},
+        "last_entity_ids": ["cust-1"],
+        "last_intent": INTENT_CUSTOMERS_SEARCH,
+    }
+    r = route("that job", context=ctx)
+    assert r.name != INTENT_JOB_GET
+    assert r.entity_id != "cust-1" or r.name != INTENT_JOB_GET
+
+
+def test_yes_please_with_pending_action_returns_confirm():
+    """'Yes please' with pending_action returns INTENT_CONFIRM and passes pending_action in slots."""
+    from src.intents.schema import IntentFilters
+    f = IntentFilters()
+    f.start_date = date(2026, 1, 26)
+    f.end_date = date(2026, 1, 30)
+    f.date_label = "last week"
+    ctx = {"pending_action": {"intent": INTENT_JOBS_LIST, "filters": f}}
+    r = route("yes please", context=ctx)
+    assert r.name == INTENT_CONFIRM
+    assert (r.raw_slots or {}).get("pending_action") is not None
+
+
+def test_confirm_never_routes_to_help_or_unknown():
+    """Confirm phrases must never route to help or unknown."""
+    r_yes = route("yes", context={})
+    assert r_yes.name == INTENT_CONFIRM
+    assert r_yes.name != INTENT_HELP
+    assert r_yes.name != INTENT_UNKNOWN
+    r_yes_please = route("yes please", context={})
+    assert r_yes_please.name == INTENT_CONFIRM
+    r_sure = route("sure", context={})
+    assert r_sure.name == INTENT_CONFIRM

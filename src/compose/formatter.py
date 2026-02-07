@@ -219,8 +219,9 @@ def format_jobs_list_by_day(
         else:
             block = no_phrase
         if include_suggestions:
-            sugs = suggestions.ops_coach_suggestions(jobs_data, date_label=date_label)
-            block += "\n\n" + get_phrase("next_actions_header") + "\n• " + "\n• ".join(sugs)
+            sugs = suggestions.ops_coach_suggestions(jobs_data, date_label=date_label, max_suggestions=1)
+            if sugs:
+                block += "\n\n" + get_phrase("next_actions_header") + "\n• " + sugs[0]
         return block
 
     by_day: dict[str, list] = defaultdict(list)
@@ -248,10 +249,10 @@ def format_jobs_list_by_day(
             lines.append(f"_… and {len(by_day[day_iso]) - max_per_day} more_")
 
     if include_suggestions:
-        sugs = suggestions.ops_coach_suggestions(jobs_data, date_label=date_label)
-        lines.append("\n" + get_phrase("next_actions_header"))
-        for s in sugs:
-            lines.append("• " + s)
+        sugs = suggestions.ops_coach_suggestions(jobs_data, date_label=date_label, max_suggestions=1)
+        if sugs:
+            lines.append("\n" + get_phrase("next_actions_header"))
+            lines.append("• " + sugs[0])
 
     return "\n".join(lines).strip()
 
@@ -313,13 +314,36 @@ def format_aggregation_unsupported(
     return f"{line1}\n\n{line2}\n\n{line3}"
 
 
+def _is_job_id(value: str) -> bool:
+    """Avoid storing customer/estimate ids as job ids (e.g. HCP job object may have id=cus_xxx)."""
+    if not value or not isinstance(value, str):
+        return False
+    v = value.strip().lower()
+    return not (v.startswith("cus_") or v.startswith("cust_") or v.startswith("est_") or v.startswith("estimate_"))
+
+
 def extract_job_ids_from_list(jobs_data: Any) -> list[str]:
     """Extract ordered list of job ids from list response (for memory / 'the second one')."""
     jobs = _list_from_response(jobs_data)
     ids = []
     for j in jobs:
         obj = j if isinstance(j, dict) else {}
-        jid = obj.get("id") or obj.get("job_id")
+        # Prefer job_id; fall back to id only if it looks like a job id (not customer/estimate)
+        jid = obj.get("job_id") or obj.get("id")
         if jid is not None:
-            ids.append(str(jid))
+            s = str(jid).strip()
+            if s and _is_job_id(s):
+                ids.append(s)
+    return ids
+
+
+def extract_entity_ids_from_list(data: Any) -> list[str]:
+    """Extract ordered entity ids from any list response (customers, estimates, jobs)."""
+    items = _list_from_response(data)
+    ids = []
+    for item in items:
+        obj = item if isinstance(item, dict) else {}
+        eid = obj.get("id") or obj.get("job_id") or obj.get("customer_id") or obj.get("estimate_id")
+        if eid is not None:
+            ids.append(str(eid))
     return ids

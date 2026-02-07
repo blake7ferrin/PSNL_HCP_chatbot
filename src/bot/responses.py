@@ -153,11 +153,38 @@ def _job_scheduled_start_end(job: dict) -> tuple[Optional[str], Optional[str]]:
     return (start, end)
 
 
+def _looks_like_customer_not_job(obj: dict) -> bool:
+    """True if the object has customer fields but no job fields (API sometimes returns customer for job id)."""
+    if not obj or not isinstance(obj, dict):
+        return False
+    has_customer = any(
+        obj.get(k) is not None
+        for k in ("first_name", "last_name", "email", "mobile_number", "company", "lead_source")
+    )
+    has_job = any(
+        obj.get(k) is not None
+        for k in ("address", "scheduled_start", "scheduled_start_date", "status", "invoice", "line_items")
+    )
+    return bool(has_customer and not has_job)
+
+
 def format_job_detail(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
     """Format a single job (from get_job response). Scheduled/times in user TZ; amounts via format_money only."""
-    job = _one(data) or data if isinstance(data, dict) else {}
+    # Use "job" wrapper when present; otherwise treat data as the job (don't unwrap nested "customer" via _one())
+    if isinstance(data, dict) and "job" in data and isinstance(data["job"], dict):
+        job = data["job"]
+    elif isinstance(data, dict):
+        job = data
+    else:
+        job = {}
     if not job:
         return "Job not found."
+
+    if _looks_like_customer_not_job(job):
+        return (
+            "That ID returned a customer record, not a job. "
+            "Ask for \"Jobs next week\" (or a date), then ask for \"details\" on one of the jobs listed."
+        )
 
     jid = job.get("id") or job.get("job_id") or "?"
     status = _safe(job.get("status"))
@@ -196,6 +223,8 @@ def format_job_detail(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
         lines.append(f"Total: {format_money(total_val)}")
     if outstanding_val is not None:
         lines.append(f"Outstanding: {format_money(outstanding_val)}")
+    if total_val is None and outstanding_val is None:
+        lines.append("No invoice total for this job yet.")
     return "\n".join(lines)
 
 
