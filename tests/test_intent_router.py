@@ -154,3 +154,71 @@ def test_details_next_weeks_job_with_context():
     r = route("details on next weeks job?", context=ctx)
     assert r.name == INTENT_JOB_GET
     assert r.entity_id == "job-xyz"
+
+
+# ---- Conversation anchor: resolved_entity (injected by handler when anchor + reference phrase) ----
+
+def test_resolved_entity_total_on_that_one():
+    """jobs.list → 'what's the total on that one?' → job.get with correct ID."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["job-abc"], "date_range": None}}
+    r = route("what's the total on that one?", context=ctx)
+    assert r.name == INTENT_JOB_GET
+    assert r.entity_id == "job-abc"
+
+
+def test_resolved_entity_details_next_weeks_job():
+    """jobs.list(next week, 1 job) → 'details on next weeks job' → job.get."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["job-xyz"], "date_range": None}}
+    r = route("details on next weeks job", context=ctx)
+    assert r.name == INTENT_JOB_GET
+    assert r.entity_id == "job-xyz"
+
+
+def test_resolved_entity_multiple_jobs_that_one_clarification():
+    """jobs.list(2 jobs) → 'that one' (no ordinal) → clarification question."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["j1", "j2"], "date_range": None}}
+    r = route("that one", context=ctx)
+    assert r.name == INTENT_UNKNOWN
+    assert (r.raw_slots or {}).get("clarification") == "multiple_jobs"
+
+
+def test_resolved_entity_multiple_jobs_second_one_resolved():
+    """jobs.list(2 jobs) → 'the second one' → job.get with second ID."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["j1", "j2"], "date_range": None}}
+    r = route("the second one", context=ctx)
+    assert r.name == INTENT_JOB_GET
+    assert r.entity_id == "j2"
+
+
+def test_no_anchor_that_one_polite_clarification():
+    """No anchor → 'that one' → polite clarification (no_job)."""
+    ctx = {"reference_phrase_used": True}
+    r = route("that one", context=ctx)
+    assert r.name == INTENT_UNKNOWN
+    assert (r.raw_slots or {}).get("clarification") == "no_job"
+
+
+def test_resolved_entity_total_gets_focus_money():
+    """'what's the total?' with single job in anchor → job.get with focus=money."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["job-123"], "date_range": None}}
+    r = route("what's the total on that one?", context=ctx)
+    assert r.name == INTENT_JOB_GET
+    assert r.entity_id == "job-123"
+    assert getattr(r, "focus", None) == "money"
+
+
+def test_resolved_entity_total_amount_without_that_one():
+    """'what's the total?' (no 'that one') with single job in anchor → job.get with focus=money."""
+    ctx = {"resolved_entity": {"type": "job", "ids": ["job-456"], "date_range": None}}
+    r = route("what's the total?", context=ctx)
+    assert r.name == INTENT_JOB_GET
+    assert r.entity_id == "job-456"
+    assert getattr(r, "focus", None) == "money"
+
+
+def test_resolved_entity_zero_ids_no_job_clarification():
+    """Anchor with 0 jobs → 'that one' → no_job clarification."""
+    ctx = {"resolved_entity": {"type": "job", "ids": [], "date_range": None}}
+    r = route("that one", context=ctx)
+    assert r.name == INTENT_UNKNOWN
+    assert (r.raw_slots or {}).get("clarification") == "no_job"

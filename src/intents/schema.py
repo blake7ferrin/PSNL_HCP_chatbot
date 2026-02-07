@@ -42,6 +42,8 @@ class Intent:
     confidence: float = 1.0
     # Optional: raw slots from NLU (e.g. "Tuesday") for follow-up resolution
     raw_slots: dict[str, Any] = field(default_factory=dict)
+    # Optional: "money" when user asks for total/amount/cost - use shorter response
+    focus: Optional[str] = None
 
     @property
     def is_list_intent(self) -> bool:

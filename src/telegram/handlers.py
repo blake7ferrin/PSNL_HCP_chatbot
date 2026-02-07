@@ -96,6 +96,37 @@ def _filters_to_dates(f: IntentFilters) -> tuple[str | None, str | None]:
     return start.isoformat() if isinstance(start, date) else str(start), (end.isoformat() if isinstance(end, date) else str(end)) if end else None
 
 
+# Reference phrases that refer to the last list/job (conversation anchor)
+_REFERENCE_PHRASES = (
+    "that one",
+    "the one",
+    "that job",
+    "next week's job",
+    "the job next week",
+    "next weeks job",
+    "next weeks",
+)
+# Follow-up intents that implicitly refer to last job when anchor has single id
+_TOTAL_DETAILS_PHRASES = ("total", "details", "info", "amount", "cost", "price", "show job")
+
+
+def _should_inject_resolved_entity(text: str, anchor: dict) -> bool:
+    """
+    True if we should inject resolved_entity into context.
+    - Reference phrase (that one, next week's job, etc.) + anchor exists
+    - OR total/details/amount + anchor exists with exactly 1 job
+    """
+    if not anchor:
+        return False
+    ids = anchor.get("ids") or []
+    lower = text.lower().strip()
+    if any(p in lower for p in _REFERENCE_PHRASES):
+        return True
+    if len(ids) == 1 and any(p in lower for p in _TOTAL_DETAILS_PHRASES):
+        return True
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route message -> intent -> HCP -> compose -> reply; update memory."""
     if not update.message or not update.message.text:
@@ -115,7 +146,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     memory = get_chat_memory(str(chat_id))
-    intent = route(text, context=memory.to_context(), tz_name=memory.timezone)
+    ctx = memory.to_context()
+    # Pre-route: inject resolved_entity when user references last job and we have anchor
+    anchor = memory.get_anchor()
+    if _should_inject_resolved_entity(text, anchor):
+        date_range = anchor.get("date_range")
+        if date_range and isinstance(date_range, (list, tuple)) and len(date_range) >= 2:
+            s, e = date_range[0], date_range[1]
+            ctx["resolved_entity"] = {
+                "type": anchor.get("type") or "job",
+                "ids": list(anchor.get("ids") or []),
+                "date_range": (s, e),
+            }
+        else:
+            ctx["resolved_entity"] = {
+                "type": anchor.get("type") or "job",
+                "ids": list(anchor.get("ids") or []),
+                "date_range": None,
+            }
+    elif any(p in text.lower() for p in _REFERENCE_PHRASES) and not anchor:
+        ctx["reference_phrase_used"] = True
+    intent = route(text, context=ctx, tz_name=memory.timezone)
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
@@ -133,17 +184,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         use_markdown = True
         entity_ids = None
 
+    # Write anchor after successful entity responses; clear on topic change
     if entity_ids is not None and intent.name == INTENT_JOBS_LIST:
+        start_d = intent.filters.start_date
+        end_d = intent.filters.end_date or start_d
+        date_range = (start_d, end_d) if start_d and end_d else None
+        memory.set_anchor(
+            "job",
+            ids=entity_ids,
+            date_range=date_range,
+            label=intent.filters.date_label or "",
+        )
         memory.update_after_intent(
             intent.name,
-            start_date=intent.filters.start_date,
-            end_date=intent.filters.end_date,
+            start_date=start_d,
+            end_date=end_d,
             date_label=intent.filters.date_label or "",
-            entity_ids=entity_ids,
-            entity_type="job",
-            entity_id=entity_ids[0] if entity_ids else None,
         )
-    elif intent.name in (INTENT_JOBS_LIST,) and (intent.filters.start_date or intent.filters.end_date):
+    elif intent.name == INTENT_JOBS_LIST and (intent.filters.start_date or intent.filters.end_date):
         memory.update_after_intent(
             intent.name,
             start_date=intent.filters.start_date,
@@ -151,7 +209,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             date_label=intent.filters.date_label or "",
         )
     elif intent.name == INTENT_JOB_GET and intent.entity_id:
+        memory.set_anchor("job", [intent.entity_id])
         memory.update_after_intent(intent.name, entity_type="job", entity_id=intent.entity_id)
+    elif intent.name in (
+        INTENT_ESTIMATES_LIST,
+        INTENT_ESTIMATE_GET,
+        INTENT_CUSTOMERS_SEARCH,
+        INTENT_CUSTOMER_GET,
+        INTENT_HELP,
+        INTENT_COMPANY_INFO,
+        INTENT_PRICEBOOK_SEARCH,
+        INTENT_STATS,
+    ):
+        memory.clear_anchor()
 
     try:
         await update.message.reply_text(reply or "Something went wrong.", parse_mode="Markdown" if use_markdown else None)
@@ -170,6 +240,11 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
         return format_help_message(), True, None
 
     if intent.name == INTENT_UNKNOWN:
+        clarification = (intent.raw_slots or {}).get("clarification")
+        if clarification == "multiple_jobs":
+            return "I see multiple jobs. Do you mean the first or second one?", True, None
+        if clarification == "no_job":
+            return "I don't see a job in context. Want me to show next week again?", True, None
         hint = intent.raw_slots.get("hint") if intent.raw_slots else None
         if hint:
             return hint + "\n\n" + format_unknown_capabilities(with_buttons_hint=False), True, None
@@ -190,6 +265,8 @@ async def _dispatch(intent: Intent, user_message: str, *, tz_name: str = "Americ
     # ---- job.get (always use deterministic format for correct money + timezone) ----
     if intent.name == INTENT_JOB_GET and intent.entity_id:
         data = await hcp_jobs.get_job(intent.entity_id)
+        if getattr(intent, "focus", None) == "money":
+            return responses.format_job_total_only(data), True, None
         return responses.format_job_detail(data, tz_name=tz_name), True, None
 
     # ---- job.time (what time is it at? for last job) ----

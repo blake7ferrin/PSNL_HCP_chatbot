@@ -100,6 +100,34 @@ def route(
     last_entity_id = context.get("last_entity_id")
     tz = context.get("timezone") or tz_name
 
+    # ---- Pre-routed resolved entity (from conversation anchor + reference phrase) ----
+    resolved = context.get("resolved_entity")
+    if resolved:
+        re_ids = resolved.get("ids") or []
+        re_type = resolved.get("type") or "job"
+        _TOTAL_KW = ("total", "amount", "cost", "price")
+        if re_type == "job":
+            if len(re_ids) == 0:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
+            if len(re_ids) == 1:
+                _TIME_KW = ("time", "what time", "when", "arrival", "arrival window")
+                if any(k in normalized for k in _TIME_KW):
+                    return Intent(INTENT_JOB_TIME, entity_id=re_ids[0])
+                focus = "money" if any(k in normalized for k in _TOTAL_KW) else None
+                return Intent(INTENT_JOB_GET, entity_id=re_ids[0], focus=focus)
+            # multiple ids: resolve ordinal or ask for clarification
+            list_index = _parse_list_index(user_text)
+            # "that one" / "the one" are references, not "the first one" — don't resolve to index 1
+            if list_index == 1 and ("that one" in normalized or "the one" in normalized):
+                list_index = None
+            if list_index is not None and 1 <= list_index <= len(re_ids):
+                focus = "money" if any(k in normalized for k in _TOTAL_KW) else None
+                return Intent(INTENT_JOB_GET, entity_id=re_ids[list_index - 1], focus=focus)
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
+    # Reference phrase but no anchor (e.g. "that one" with no previous list)
+    if context.get("reference_phrase_used"):
+        return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
+
     # ---- "What time is it at?" / time query with last job context ----
     _TIME_QUERY_KEYWORDS = ("time", "what time", "when", "arrival", "arrival window")
     if any(k in normalized for k in _TIME_QUERY_KEYWORDS):
@@ -160,13 +188,16 @@ def route(
 
     # ---- "The second one" / "details for #2" -> resolve from last list ----
     list_index = _parse_list_index(user_text)
+    last_anchor = context.get("last_anchor")
     if list_index is not None and not last_entity_ids:
-        # Ordinal phrase with no context ("the third one") -> unknown, not help (not "job 12345")
+        # Ordinal phrase with no context - never say "No previous list" if anchor exists
         if re.search(r"\b(?:the\s+)?(?:first|second|third|fourth|fifth|one|two|three)\b", normalized):
+            if last_anchor:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
             return Intent(
                 INTENT_UNKNOWN,
                 confidence=0.5,
-                raw_slots={"list_index": list_index, "hint": "No previous list to pick from."},
+                raw_slots={"list_index": list_index, "hint": "Which job do you mean? Try asking for \"jobs next week\" first."},
             )
     elif list_index is not None and last_entity_ids:
         idx = list_index - 1
@@ -178,10 +209,12 @@ def route(
                 return Intent(INTENT_ESTIMATE_GET, entity_id=resolved_id)
             if last_intent == INTENT_CUSTOMERS_SEARCH:
                 return Intent(INTENT_CUSTOMER_GET, entity_id=resolved_id)
+        if last_anchor:
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
         return Intent(
             INTENT_UNKNOWN,
             confidence=0.5,
-            raw_slots={"list_index": list_index, "hint": "No previous list to pick from."},
+            raw_slots={"list_index": list_index, "hint": "Which job do you mean? Try asking for \"jobs next week\" first."},
         )
 
     # ---- Date range for jobs/schedule ----

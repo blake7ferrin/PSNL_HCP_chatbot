@@ -1,4 +1,4 @@
-"""Per-chat memory: last intent, date range, entity IDs. In-memory; design allows sqlite later."""
+"""Per-chat memory: last intent, date range, entity IDs, conversation anchor."""
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Optional
@@ -7,6 +7,9 @@ from typing import Any, Optional
 _store: dict[str, "ChatMemory"] = {}
 
 DEFAULT_TZ = "America/Phoenix"
+
+# Anchor date_range: tuple (start_date, end_date) or None
+AnchorDateRange = tuple[date, date] | None
 
 
 @dataclass
@@ -21,10 +24,11 @@ class ChatMemory:
     last_entity_type: Optional[str] = None
     last_entity_id: Optional[str] = None
     timezone: str = DEFAULT_TZ
+    last_anchor: Optional[dict[str, Any]] = None
 
     def to_context(self) -> dict[str, Any]:
         """Export for intent router (date as ISO string for JSON/sqlite)."""
-        return {
+        out = {
             "last_intent": self.last_intent,
             "last_start_date": self.last_start_date.isoformat() if self.last_start_date else None,
             "last_end_date": self.last_end_date.isoformat() if self.last_end_date else None,
@@ -34,6 +38,40 @@ class ChatMemory:
             "last_entity_id": self.last_entity_id,
             "timezone": self.timezone,
         }
+        if self.last_anchor is not None:
+            anchor = dict(self.last_anchor)
+            if anchor.get("date_range"):
+                s, e = anchor["date_range"]
+                anchor["date_range"] = (s.isoformat() if hasattr(s, "isoformat") else s, e.isoformat() if hasattr(e, "isoformat") else e)
+            out["last_anchor"] = anchor
+        return out
+
+    def set_anchor(
+        self,
+        type_name: str,
+        ids: list[str],
+        *,
+        date_range: AnchorDateRange = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Set conversation anchor after a successful entity response (jobs list or job get)."""
+        self.last_anchor = {
+            "type": type_name,
+            "ids": list(ids),
+            "date_range": date_range,
+            "label": label or "",
+        }
+        self.last_entity_ids = list(ids)
+        self.last_entity_type = type_name
+        self.last_entity_id = ids[0] if ids else None
+
+    def get_anchor(self) -> Optional[dict[str, Any]]:
+        """Return current anchor (type, ids, date_range, label) or None."""
+        return self.last_anchor
+
+    def clear_anchor(self) -> None:
+        """Clear anchor when user explicitly changes topic (e.g. customers, estimates, help)."""
+        self.last_anchor = None
 
     def update_after_intent(
         self,

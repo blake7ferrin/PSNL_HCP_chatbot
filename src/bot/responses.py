@@ -198,6 +198,21 @@ def format_job_detail(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
     return "\n".join(lines)
 
 
+def format_job_total_only(data: Any) -> str:
+    """Format only the total/amount for a job (for 'what's the total?' follow-up)."""
+    job = _one(data) or data if isinstance(data, dict) else {}
+    if not job:
+        return "Job not found."
+    jid = _job_short_id(job)
+    total_val, outstanding_val = get_best_money_fields(job)
+    if total_val is not None:
+        line = f"Job #{jid}: Total {format_money(total_val)}"
+        if outstanding_val is not None and outstanding_val != total_val:
+            line += f" (Outstanding: {format_money(outstanding_val)})"
+        return line
+    return f"Job #{jid}: No total amount on file."
+
+
 def format_job_time_only(data: Any, tz_name: str = DEFAULT_USER_TZ) -> str:
     """Format only the schedule line for a job (for 'what time is it at?' follow-up)."""
     job = _one(data) or data if isinstance(data, dict) else {}
