@@ -319,7 +319,8 @@ def _is_job_id(value: str) -> bool:
     if not value or not isinstance(value, str):
         return False
     v = value.strip().lower()
-    return not (v.startswith("cus_") or v.startswith("cust_") or v.startswith("est_") or v.startswith("estimate_"))
+    non_job_prefixes = ("cus_", "cust_", "customer_", "est_", "estimate_")
+    return not v.startswith(non_job_prefixes)
 
 
 def extract_job_ids_from_list(jobs_data: Any) -> list[str]:
