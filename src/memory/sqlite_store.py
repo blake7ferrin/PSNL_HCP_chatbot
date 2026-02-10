@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -58,7 +58,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _serialize_anchor(anchor: Optional[ConversationAnchor]) -> Optional[str]:
@@ -76,9 +76,14 @@ def _deserialize_anchor(raw: Optional[str]) -> Optional[ConversationAnchor]:
         return None
 
 
-def _serialize_pending(action: Optional[PendingAction]) -> Optional[str]:
+def _serialize_pending(action: Optional[PendingAction | dict[str, object]]) -> Optional[str]:
     if not action:
         return None
+    if isinstance(action, dict):
+        parsed = PendingAction.from_dict(action)
+        if not parsed:
+            return None
+        action = parsed
     return json.dumps(action.to_dict(), separators=(",", ":"))
 
 
