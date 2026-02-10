@@ -51,14 +51,19 @@ def _extract_id(text: str, prefix: str) -> Optional[str]:
     normalized = _normalize(text)
     prefix = prefix.lower()
     patterns = [
-        rf"\b{re.escape(prefix)}\s*#?\s*(\w+)",
-        rf"\b(?:number|#|id)\s*(\w+)\s*(?:{re.escape(prefix)})?",
+        rf"\b{re.escape(prefix)}\b\s*#?\s*([A-Za-z0-9_-]+)\b",
+        rf"\b(?:number|#|id)\s*([A-Za-z0-9_-]+)\b\s*(?:{re.escape(prefix)})?\b",
     ]
     for pat in patterns:
         m = re.search(pat, normalized)
         if m:
             return m.group(1).strip()
     return None
+
+
+def _is_candidate_id(entity_id: str) -> bool:
+    token = str(entity_id).strip()
+    return len(token) >= 2 and bool(re.fullmatch(r"[A-Za-z0-9_-]+", token))
 
 
 def _is_valid_entity_id(entity_type: str, entity_id: str) -> bool:
@@ -242,22 +247,22 @@ def route(
 
     # ---- job.get by id: "job 12345", "get job 456" (not "jobs today" -> id "s") ----
     job_id = _extract_id(user_text, "job")
-    if job_id and len(job_id) >= 2 and (job_id.isdigit() or job_id.replace("-", "").isalnum()):
-        if not _is_valid_entity_id("job", job_id):
+    if job_id:
+        if not _is_candidate_id(job_id) or not _is_valid_entity_id("job", job_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a job ID."})
         return Intent(INTENT_JOB_GET, entity_id=job_id)
 
     # ---- estimate.get by id ----
     estimate_id = _extract_id(user_text, "estimate")
-    if estimate_id and len(estimate_id) >= 2 and (estimate_id.isdigit() or estimate_id.isalnum()):
-        if not _is_valid_entity_id("estimate", estimate_id):
+    if estimate_id:
+        if not _is_candidate_id(estimate_id) or not _is_valid_entity_id("estimate", estimate_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like an estimate ID."})
         return Intent(INTENT_ESTIMATE_GET, entity_id=estimate_id)
 
     # ---- customer.get by id ----
     customer_id = _extract_id(user_text, "customer")
-    if customer_id and len(customer_id) >= 2 and (customer_id.isdigit() or customer_id.isalnum()):
-        if not _is_valid_entity_id("customer", customer_id):
+    if customer_id:
+        if not _is_candidate_id(customer_id) or not _is_valid_entity_id("customer", customer_id):
             return Intent(INTENT_UNKNOWN, raw_slots={"hint": "That doesn't look like a customer ID."})
         return Intent(INTENT_CUSTOMER_GET, entity_id=customer_id)
 
