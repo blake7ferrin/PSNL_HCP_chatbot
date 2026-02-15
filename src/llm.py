@@ -29,6 +29,7 @@ def _get_client():
     _ensure_env_loaded()
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     openai_key = (os.getenv("OPENAI_API_KEY", "") or os.getenv("LLM_API_KEY", "")).strip()
+    xai_key = os.getenv("XAI_API_KEY", "").strip()
     if openrouter_key:
         from openai import AsyncOpenAI
         _client = AsyncOpenAI(
@@ -42,6 +43,14 @@ def _get_client():
         _client = AsyncOpenAI(api_key=openai_key)
         _model = os.getenv("LLM_MODEL", "").strip() or "gpt-4o-mini"
         logger.debug("LLM: using OpenAI model=%s", _model)
+    elif xai_key:
+        from openai import AsyncOpenAI
+        _client = AsyncOpenAI(
+            api_key=xai_key,
+            base_url="https://api.x.ai/v1",
+        )
+        _model = os.getenv("LLM_MODEL", "").strip() or "grok-beta"
+        logger.debug("LLM: using xAI model=%s", _model)
     else:
         _client = False  # no key
         _model = None
@@ -144,3 +153,29 @@ Reply with a SHORT, friendly summary for Telegram (under 800 characters). Use si
     except Exception as e:
         logger.warning("LLM format_response(%s) failed: %s", intent, e, exc_info=logger.isEnabledFor(logging.DEBUG))
         return None
+
+async def parse_user_query(user_text: str) -> dict:
+    """Parse natural language query to intent and filters using LLM."""
+    client, model = _get_client()
+    if client is None or client is False:
+        return {"intent": "unknown"}
+    prompt = f"""You are a query parser for a Housecall Pro API chatbot.
+Parse the user query into an intent and filters.
+Available intents: jobs.list, job.get, estimates.list, estimate.get, customers.search, customer.get, pricebook.search, company.info, stats, help, invoices.list, invoice.get, payments.list, payment.get, reports.list, appointments.list, employees.list, materials.list
+Filters are optional dict with keys like start_date (YYYY-MM-DD), end_date, status, amount_gt (number), amount_lt, etc.
+Assume current date is {date.today().isoformat()} for relative dates like 'last week'.
+Output only valid JSON, no other text. Example:
+{{"intent": "invoices.list", "filters": {{"amount_gt": 500, "start_date": "2024-02-07", "end_date": "2024-02-14"}}}}
+Query: {user_text}"""
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": "Output only JSON."}, {"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        text = response.choices[0].message.content.strip()
+        return json.loads(text)
+    except Exception as e:
+        logger.warning("LLM parse_user_query failed: %s", e)
+        return {"intent": "unknown"}
+

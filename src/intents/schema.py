@@ -20,6 +20,14 @@ INTENT_HELP = "help"
 INTENT_AGGREGATION_UNSUPPORTED = "aggregation.unsupported"
 INTENT_CONFIRM = "confirm"
 INTENT_UNKNOWN = "unknown"
+INTENT_INVOICES_LIST = "invoices.list"
+INTENT_INVOICE_GET = "invoice.get"
+INTENT_PAYMENTS_LIST = "payments.list"
+INTENT_PAYMENT_GET = "payment.get"
+INTENT_REPORTS_LIST = "reports.list"
+INTENT_APPOINTMENTS_LIST = "appointments.list"
+INTENT_EMPLOYEES_LIST = "employees.list"
+INTENT_MATERIALS_LIST = "materials.list"
 
 
 @dataclass
@@ -32,6 +40,8 @@ class IntentFilters:
     list_index: Optional[int] = None
     # Raw parsed date strings for display (e.g. "next week")
     date_label: Optional[str] = None
+    amount_gt: Optional[float] = None
+    amount_lt: Optional[float] = None
 
 
 @dataclass
@@ -53,6 +63,9 @@ class Intent:
             INTENT_JOBS_LIST,
             INTENT_ESTIMATES_LIST,
             INTENT_CUSTOMERS_SEARCH,
+            INTENT_INVOICES_LIST,
+            INTENT_PAYMENTS_LIST,
+            INTENT_REPORTS_LIST,
         )
 
     @property
@@ -61,4 +74,6 @@ class Intent:
             INTENT_JOB_GET,
             INTENT_ESTIMATE_GET,
             INTENT_CUSTOMER_GET,
+            INTENT_INVOICE_GET,
+            INTENT_PAYMENT_GET,
         )

@@ -66,7 +66,7 @@ def _list_from_response(data: Any) -> list:
 _JOBS_PATHS = ("jobs", "housecall/v1/jobs", "v1/jobs", "api/v1/jobs")
 
 
-async def _get_jobs_raw(c: HCPClient, path: str, params: Optional[dict]) -> Any:
+async def _get_jobs_raw(c: HCPClient, path: str, params: Optional[dict] ) -> Any:
     """GET jobs from one path. Raises HCPClientError on failure."""
     return await c.get(path, params=params)
 
@@ -386,3 +386,90 @@ async def list_appointments(
         return await _get_first_ok(c, _APPOINTMENTS_PATHS, params=params if params else None)
     except HCPClientError:
         return {}
+
+# ---- Invoices (assuming root paths first per HCP Public API) ----
+_INVOICES_PATHS = ("invoices", "housecall/v1/invoices", "v1/invoices", "api/v1/invoices")
+_INVOICE_DETAIL_PATHS = ("invoices/{id}", "housecall/v1/invoices/{id}", "v1/invoices", "api/v1/invoices/{id}")
+
+async def list_invoices(
+    client: Optional[HCPClient] = None,
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Any:
+    """List invoices with optional filters."""
+    c = client or _client()
+    params: dict[str, Any] = {}
+    if page is not None:
+        params["page"] = page
+    if per_page is not None:
+        params["per_page"] = per_page
+    if status is not None:
+        params["status"] = status
+    if start_date is not None:
+        params["start_date"] = start_date
+    if end_date is not None:
+        params["end_date"] = end_date
+    return await _get_first_ok(c, _INVOICES_PATHS, params=params if params else None)
+
+async def get_invoice(invoice_id: str, client: Optional[HCPClient] = None) -> Any:
+    """Get a single invoice by id."""
+    c = client or _client()
+    paths = tuple(p.format(id=invoice_id) for p in _INVOICE_DETAIL_PATHS)
+    return await _get_first_ok(c, paths)
+
+# ---- Payments ----
+_PAYMENTS_PATHS = ("payments", "housecall/v1/payments", "v1/payments", "api/v1/payments")
+_PAYMENT_DETAIL_PATHS = ("payments/{id}", "housecall/v1/payments/{id}", "v1/payments/{id}", "api/v1/payments/{id}")
+
+async def list_payments(
+    client: Optional[HCPClient] = None,
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Any:
+    """List payments with optional filters."""
+    c = client or _client()
+    params: dict[str, Any] = {}
+    if page is not None:
+        params["page"] = page
+    if per_page is not None:
+        params["per_page"] = per_page
+    if status is not None:
+        params["status"] = status
+    if start_date is not None:
+        params["start_date"] = start_date
+    if end_date is not None:
+        params["end_date"] = end_date
+    return await _get_first_ok(c, _PAYMENTS_PATHS, params=params if params else None)
+
+async def get_payment(payment_id: str, client: Optional[HCPClient] = None) -> Any:
+    """Get a single payment by id."""
+    c = client or _client()
+    paths = tuple(p.format(id=payment_id) for p in _PAYMENT_DETAIL_PATHS)
+    return await _get_first_ok(c, paths)
+
+# ---- Reports ----
+_REPORTS_PATHS = ("reports", "housecall/v1/reports", "v1/reports", "api/v1/reports")
+
+async def list_reports(
+    client: Optional[HCPClient] = None,
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    type: Optional[str] = None,
+) -> Any:
+    """List reports with optional type filter."""
+    c = client or _client()
+    params: dict[str, Any] = {}
+    if page is not None:
+        params["page"] = page
+    if per_page is not None:
+        params["per_page"] = per_page
+    if type is not None:
+        params["type"] = type
+    return await _get_first_ok(c, _REPORTS_PATHS, params=params if params else None)
+

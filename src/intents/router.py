@@ -20,63 +20,17 @@ from .schema import (
     INTENT_AGGREGATION_UNSUPPORTED,
     INTENT_CONFIRM,
     INTENT_UNKNOWN,
+    INTENT_INVOICES_LIST,
+    INTENT_INVOICE_GET,
+    INTENT_PAYMENTS_LIST,
+    INTENT_PAYMENT_GET,
+    INTENT_REPORTS_LIST,
 )
 from .dateparse import parse_human_date, DEFAULT_TZ
 
-
-def _normalize(text: str) -> str:
-    return " ".join(text.lower().strip().split())
-
-
-# Keywords/phrases per intent (lowercase)
-_HELP_KEYWORDS = ("help", "what can you do", "commands", "support", "hi", "hello")
-_JOBS_KEYWORDS = ("job", "jobs", "scheduled", "schedule", "calendar", "appointments", "any day", "anything on")
-_ESTIMATE_KEYWORDS = ("estimate", "estimates", "quote", "quotes")
-_CUSTOMER_KEYWORDS = ("customer", "customers", "client", "clients")
-_COMPANY_KEYWORDS = ("company", "business", "organization", "setup", "settings", "company info")
-_PRICEBOOK_KEYWORDS = ("pricebook", "price book", "prices", "services", "materials", "price list")
-_EMPLOYEES_KEYWORDS = ("employees", "employee", "technicians", "technician", "team", "staff")
-
-
-def _extract_id(text: str, prefix: str) -> Optional[str]:
-    """Extract id after a prefix like 'job' or 'estimate'."""
-    normalized = _normalize(text)
-    prefix = prefix.lower()
-    patterns = [
-        rf"\b{re.escape(prefix)}\s*#?\s*(\w+)",
-        rf"\b(?:number|#|id)\s*(\w+)\s*(?:{re.escape(prefix)})?",
-    ]
-    for pat in patterns:
-        m = re.search(pat, normalized)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def _parse_list_index(text: str) -> Optional[int]:
-    """Parse 'the second one', 'number 3', 'the first job', '2nd' -> 1-based index."""
-    normalized = _normalize(text)
-    # Prefer multi-syllable ordinals so "the second one" -> 2 not 1
-    ordinals_long_first = [
-        ("second", 2), ("2nd", 2), ("third", 3), ("3rd", 3),
-        ("fourth", 4), ("4th", 4), ("fifth", 5), ("5th", 5),
-        ("first", 1), ("1st", 1), ("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
-    ]
-    for word, num in ordinals_long_first:
-        if re.search(rf"\b(?:the\s+)?{word}\b", normalized):
-            return num
-    m = re.search(r"\b(?:number|#|no\.?)\s*(\d+)\b", normalized)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"\b(\d+)(?:st|nd|rd|th)?\s*(?:one|job|estimate|customer)?\b", normalized)
-    if m:
-        return int(m.group(1))
-    return None
-
-
-def route(
+async def route(
     user_text: str,
-    *,
+    *, 
     context: Optional[dict[str, Any]] = None,
     tz_name: str = DEFAULT_TZ,
 ) -> Intent:
@@ -152,6 +106,24 @@ def route(
             if list_index is not None and 1 <= list_index <= len(re_ids):
                 return Intent(INTENT_ESTIMATE_GET, entity_id=re_ids[list_index - 1])
             return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_jobs"})
+        if re_type == "invoice":
+            if len(re_ids) == 0:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_invoice"})
+            if len(re_ids) == 1:
+                return Intent(INTENT_INVOICE_GET, entity_id=re_ids[0])
+            list_index = _parse_list_index(user_text)
+            if list_index is not None and 1 <= list_index <= len(re_ids):
+                return Intent(INTENT_INVOICE_GET, entity_id=re_ids[list_index - 1])
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_invoices"})
+        if re_type == "payment":
+            if len(re_ids) == 0:
+                return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_payment"})
+            if len(re_ids) == 1:
+                return Intent(INTENT_PAYMENT_GET, entity_id=re_ids[0])
+            list_index = _parse_list_index(user_text)
+            if list_index is not None and 1 <= list_index <= len(re_ids):
+                return Intent(INTENT_PAYMENT_GET, entity_id=re_ids[list_index - 1])
+            return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "multiple_payments"})
     # Reference phrase but no anchor (e.g. "that one" with no previous list)
     if context.get("reference_phrase_used"):
         return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
@@ -170,7 +142,7 @@ def route(
 
     # ---- "What's the total on that one?" / "details on next week's job?" -> job.get from context (typed: job only) ----
     _DETAILS_TOTAL_KEYWORDS = ("total", "details", "info", "amount")
-    _THAT_ONE_PHRASES = ("that one", "the one", "that job", "next week", "next weeks")
+    _THAT_ONE_PHRASES = ("that one", "the one")
     last_anchor = context.get("last_anchor")
     if (
         last_anchor
@@ -189,7 +161,7 @@ def route(
         try:
             from datetime import date
             last_start = date.fromisoformat(last_start)
-        except ValueError:
+        except ValueValueError:
             last_start = None
     if isinstance(last_end, str):
         try:
@@ -228,6 +200,16 @@ def route(
     if customer_id and len(customer_id) >= 2 and (customer_id.isdigit() or customer_id.isalnum()):
         return Intent(INTENT_CUSTOMER_GET, entity_id=customer_id)
 
+    # ---- invoice.get by id ----
+    invoice_id = _extract_id(user_text, "invoice")
+    if invoice_id and len(invoice_id) >= 2 and (invoice_id.isdigit() or invoice_id.isalnum()):
+        return Intent(INTENT_INVOICE_GET, entity_id=invoice_id)
+
+    # ---- payment.get by id ----
+    payment_id = _extract_id(user_text, "payment")
+    if payment_id and len(payment_id) >= 2 and (payment_id.isdigit() or payment_id.isalnum()):
+        return Intent(INTENT_PAYMENT_GET, entity_id=payment_id)
+
     # ---- "The second one" / "details for #2" -> resolve from last list ----
     list_index = _parse_list_index(user_text)
     last_anchor = context.get("last_anchor")
@@ -251,6 +233,10 @@ def route(
                 return Intent(INTENT_ESTIMATE_GET, entity_id=resolved_id)
             if last_intent == INTENT_CUSTOMERS_SEARCH:
                 return Intent(INTENT_CUSTOMER_GET, entity_id=resolved_id)
+            if last_intent == INTENT_INVOICES_LIST:
+                return Intent(INTENT_INVOICE_GET, entity_id=resolved_id)
+            if last_intent == INTENT_PAYMENTS_LIST:
+                return Intent(INTENT_PAYMENT_GET, entity_id=resolved_id)
         if last_anchor:
             return Intent(INTENT_UNKNOWN, raw_slots={"clarification": "no_job"})
         return Intent(
@@ -317,6 +303,27 @@ def route(
             filters.status = "open"
         return Intent(INTENT_ESTIMATES_LIST, filters=filters)
 
+    # ---- Invoices list ----
+    if any(k in normalized for k in _INVOICES_KEYWORDS):
+        return Intent(INTENT_INVOICES_LIST, filters=filters)
+
+    # ---- Payments list ----
+    if any(k in normalized for k in _PAYMENTS_KEYWORDS):
+        return Intent(INTENT_PAYMENTS_LIST, filters=filters)
+
+    # ---- Reports list ----
+    if any(k in normalized for k in _REPORTS_KEYWORDS):
+        return Intent(INTENT_REPORTS_LIST, filters=filters)
+    # ---- Appointments list ----
+    if any(k in normalized for k in _APPOINTMENTS_KEYWORDS):
+        return Intent(INTENT_APPOINTMENTS_LIST, filters=filters)
+    # ---- Employees list ----
+    if any(k in normalized for k in _EMPLOYEES_KEYWORDS):
+        return Intent(INTENT_EMPLOYEES_LIST, filters=filters)
+    # ---- Materials list ----
+    if any(k in normalized for k in _MATERIALS_KEYWORDS):
+        return Intent(INTENT_MATERIALS_LIST, filters=filters)
+
     # ---- Customers list ----
     if any(k in normalized for k in _CUSTOMER_KEYWORDS):
         return Intent(INTENT_CUSTOMERS_SEARCH)
@@ -331,4 +338,68 @@ def route(
             filters.date_label = "today"
         return Intent(INTENT_JOBS_LIST, filters=filters)
 
+    # Fallback to LLM parser
+    from src import llm
+    llm_parse = await llm.parse_user_query(user_text)
+    if llm_parse.get("intent") != "unknown":
+        filters_dict = llm_parse.get("filters", {})
+        filters = IntentFilters(**filters_dict)
+        return Intent(llm_parse["intent"], filters=filters, confidence=0.8)
+
     return Intent(INTENT_UNKNOWN, confidence=0.0)
+
+
+def _normalize(text: str) -> str:
+    return " ".join(text.lower().strip().split())
+
+
+# Keywords/phrases per intent (lowercase)
+_HELP_KEYWORDS = ("help", "what can you do", "commands", "support", "hi", "hello")
+_JOBS_KEYWORDS = ("job", "jobs", "scheduled", "schedule", "calendar", "appointments", "any day", "anything on")
+_ESTIMATE_KEYWORDS = ("estimate", "estimates", "quote", "quotes")
+_CUSTOMER_KEYWORDS = ("customer", "customers", "client", "clients")
+_COMPANY_KEYWORDS = ("company", "business", "organization", "setup", "settings", "company info")
+_PRICEBOOK_KEYWORDS = ("pricebook", "price book", "prices", "services", "materials", "price list")
+_EMPLOYEES_KEYWORDS = ("employees", "employee", "technicians", "technician", "team", "staff")
+_INVOICES_KEYWORDS = ("invoice", "invoices", "bill", "bills")
+_PAYMENTS_KEYWORDS = ("payment", "payments", "paid", "pay")
+_REPORTS_KEYWORDS = ("report", "reports", "analytics", "summary")
+_APPOINTMENTS_KEYWORDS = ("appointment", "appointments", "booking", "bookings")
+_EMPLOYEES_KEYWORDS = ("employee", "employees", "staff", "team", "technician", "technicians")
+_MATERIALS_KEYWORDS = ("material", "materials", "inventory", "parts")
+
+
+def _extract_id(text: str, prefix: str) -> Optional[str]:
+    """Extract id after a prefix like 'job' or 'estimate'."""
+    normalized = _normalize(text)
+    prefix = prefix.lower()
+    patterns = [
+        rf"\b{re.escape(prefix)}\s*#?\s*(\w+)",
+        rf"\b(?:number|#|id)\s*(\w+)\s*(?:{re.escape(prefix)})?",
+    ]
+    for pat in patterns:
+        m = re.search(pat, normalized)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _parse_list_index(text: str) -> Optional[int]:
+    """Parse 'the second one', 'number 3', 'the first job', '2nd' -> 1-based index."""
+    normalized = _normalize(text)
+    # Prefer multi-syllable ordinals so "the second one" -> 2 not 1
+    ordinals_long_first = [
+        ("second", 2), ("2nd", 2), ("third", 3), ("3rd", 3),
+        ("fourth", 4), ("4th", 4), ("fifth", 5), ("5th", 5),
+        ("first", 1), ("1st", 1), ("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
+    ]
+    for word, num in ordinals_long_first:
+        if re.search(rf"\b(?:the\s+)?{word}\b", normalized):
+            return num
+    m = re.search(r"\b(?:number|#|no\.?)\s*(\d+)\b", normalized)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d+)(?:st|nd|rd|th)?\s*(?:one|job|estimate|customer)?\b", normalized)
+    if m:
+        return int(m.group(1))
+    return None

@@ -18,6 +18,14 @@ from src.intents.schema import (
     INTENT_AGGREGATION_UNSUPPORTED,
     INTENT_CONFIRM,
     INTENT_UNKNOWN,
+    INTENT_INVOICES_LIST,
+    INTENT_INVOICE_GET,
+    INTENT_PAYMENTS_LIST,
+    INTENT_PAYMENT_GET,
+    INTENT_REPORTS_LIST,
+    INTENT_APPOINTMENTS_LIST,
+    INTENT_EMPLOYEES_LIST,
+    INTENT_MATERIALS_LIST,
 )
 
 
@@ -313,3 +321,37 @@ def test_confirm_never_routes_to_help_or_unknown():
     assert r_yes_please.name == INTENT_CONFIRM
     r_sure = route("sure", context={})
     assert r_sure.name == INTENT_CONFIRM
+
+def test_invoices_list():
+    assert route("invoices").name == INTENT_INVOICES_LIST
+    assert route("list invoices").name == INTENT_INVOICES_LIST
+
+def test_invoice_get():
+    r = route("invoice 123")
+    assert r.name == INTENT_INVOICE_GET
+    assert r.entity_id == "123"
+
+def test_payments_list():
+    assert route("payments").name == INTENT_PAYMENTS_LIST
+    assert route("list payments").name == INTENT_PAYMENTS_LIST
+
+def test_payment_get():
+    r = route("payment 456")
+    assert r.name == INTENT_PAYMENT_GET
+    assert r.entity_id == "456"
+
+def test_reports_list():
+    assert route("reports").name == INTENT_REPORTS_LIST
+    assert route("list reports").name == INTENT_REPORTS_LIST
+
+def test_appointments_list():
+    assert route("appointments").name == INTENT_APPOINTMENTS_LIST
+    assert route("list appointments").name == INTENT_APPOINTMENTS_LIST
+
+def test_employees_list():
+    assert route("employees").name == INTENT_EMPLOYEES_LIST
+    assert route("list employees").name == INTENT_EMPLOYEES_LIST
+
+def test_materials_list():
+    assert route("materials").name == INTENT_MATERIALS_LIST
+    assert route("list materials").name == INTENT_MATERIALS_LIST
